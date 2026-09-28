@@ -1,0 +1,24 @@
+[Unit]
+Description=remmote screen-sharing server
+Documentation=file:///usr/local/share/doc/remmote/README.md
+# Screen capture needs a running X session for DISPLAY.
+After=graphical.target
+Wants=graphical.target
+
+[Service]
+Type=simple
+User=lepe
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/lepe/.Xauthority
+ExecStart=/usr/local/bin/remmote-server -display :0 -listen :7677
+Restart=on-failure
+RestartSec=2
+
+# Hardening: everything remmote needs is X access and one TCP port.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=graphical.target
