@@ -49,7 +49,8 @@ type Watcher struct {
 	synced  []byte // last content seen going either direction
 	amOwner bool   // we hold the selection (until SelectionClear)
 
-	interval time.Duration
+	interval  time.Duration
+	closeOnce sync.Once
 }
 
 // New connects to the display and prepares the hidden window.
@@ -108,16 +109,23 @@ func (w *Watcher) intern(name string) xproto.Atom {
 }
 
 // Close shuts the X connection down.
-func (w *Watcher) Close() { w.x.Close() }
+func (w *Watcher) Close() { w.closeOnce.Do(w.x.Close) }
 
 // Run drives the watcher until ctx is done or the connection closes: it
 // polls the local clipboard and calls onLocal whenever locally-copied
 // text differs from what was last synchronized. Run blocks; run it in a
 // goroutine. xgb delivers events as values.
 func (w *Watcher) Run(ctx context.Context, onLocal func(text string)) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopClose := context.AfterFunc(ctx, w.Close)
+	defer stopClose()
+	pollDone := make(chan struct{})
+	defer func() { cancel(); <-pollDone }()
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	go func() {
+		defer close(pollDone)
 		for {
 			select {
 			case <-ctx.Done():

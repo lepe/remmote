@@ -93,7 +93,19 @@ func (m *RectUpdate) Encode() []byte {
 	return b
 }
 
+// DecodeRectUpdate returns an update with an independent copy of its data.
 func DecodeRectUpdate(p []byte) (*RectUpdate, error) {
+	m, err := DecodeRectUpdateView(p)
+	if err != nil {
+		return nil, err
+	}
+	m.Data = append([]byte(nil), m.Data...)
+	return m, nil
+}
+
+// DecodeRectUpdateView borrows its data from p. The caller must keep p
+// unchanged until it has finished decoding/compositing the update.
+func DecodeRectUpdateView(p []byte) (*RectUpdate, error) {
 	if len(p) < rectUpdateHeader {
 		return nil, fmt.Errorf("%w: RectUpdate: %d bytes", ErrShortPayload, len(p))
 	}
@@ -102,11 +114,10 @@ func DecodeRectUpdate(p []byte) (*RectUpdate, error) {
 	if w == 0 || h == 0 {
 		return nil, fmt.Errorf("%w: RectUpdate: empty %dx%d", ErrBadPayload, w, h)
 	}
-	if p[12] != CodecJPEG && p[12] != CodecWebP {
+	if p[12] != CodecJPEG && p[12] != CodecWebP && p[12] != CodecZRAW {
 		return nil, fmt.Errorf("%w: RectUpdate: unknown codec %d", ErrBadPayload, p[12])
 	}
-	data := make([]byte, len(p)-rectUpdateHeader)
-	copy(data, p[rectUpdateHeader:])
+	data := p[rectUpdateHeader:len(p):len(p)]
 	return &RectUpdate{
 		Seq:   binary.BigEndian.Uint32(p[0:4]),
 		X:     binary.BigEndian.Uint16(p[4:6]),

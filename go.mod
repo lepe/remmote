@@ -8,3 +8,5 @@ require (
 	golang.org/x/image v0.18.0
 	golang.org/x/sys v0.22.0
 )
+
+require github.com/klauspost/compress v1.17.9 // indirect

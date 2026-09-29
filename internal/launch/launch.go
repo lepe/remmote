@@ -100,9 +100,11 @@ func (p *Proc) kill(grace time.Duration) {
 	}
 	select {
 	case <-p.done:
-		return
+		// The leader can exit while descendants ignore SIGTERM.
+		_ = syscall.Kill(pgid, syscall.SIGKILL)
 	case <-time.After(grace):
 		_ = syscall.Kill(pgid, syscall.SIGKILL)
+		<-p.done // reap before the server itself exits
 	}
 }
 
@@ -118,6 +120,8 @@ type BootstrapResult struct {
 // then WM_CLASS/WM_INSTANCE against the executable basename. On
 // WM-managed displays candidates carry WM_STATE; on bare displays (Xvfb,
 // no WM) the fallback considers new viewable direct children of root.
+// The poll outlives an early process exit, because a single-instance app
+// hands off to an existing process and its window appears afterwards.
 // The returned result always carries the Proc (server policy: stay up
 // even without a window); Win is 0 when nothing appeared.
 func Bootstrap(ctx context.Context, xq *xwin.Client, cmdline, display string, log *slog.Logger) (*BootstrapResult, error) {
@@ -141,14 +145,31 @@ func Bootstrap(ctx context.Context, xq *xwin.Client, cmdline, display string, lo
 	var guess xproto.Window
 	var guessClass string
 	guessAt := time.Time{}
+	// A single-instance application (most KDE/GNOME apps — konsole, kate,
+	// dolphin) hands the request to an already-running process and exits
+	// at once, so its window appears only *after* proc.Done(). Returning
+	// there left the server serving a permanent 1×1 canvas with nothing
+	// but a warning to explain it. Keep scanning to the deadline instead:
+	// the class heuristic can still find the window, and a genuine launch
+	// failure ends exactly as before, just after the full wait.
+	procExited := false
 	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return res, nil
-		case <-proc.Done():
-			log.Warn("application exited before opening a window")
-			return res, nil
-		case <-time.After(150 * time.Millisecond):
+		if procExited {
+			select {
+			case <-ctx.Done():
+				return res, nil
+			case <-time.After(150 * time.Millisecond):
+			}
+		} else {
+			select {
+			case <-ctx.Done():
+				return res, nil
+			case <-proc.Done():
+				procExited = true
+				log.Warn("application exited before opening a window; still scanning for one",
+					"pid", pid, "err", proc.Err())
+			case <-time.After(150 * time.Millisecond):
+			}
 		}
 
 		candidates := xq.FindClientWindows()

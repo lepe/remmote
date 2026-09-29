@@ -4,12 +4,25 @@ import (
 	"bytes"
 	"log/slog"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
 
-func testLogger(buf *bytes.Buffer) *slog.Logger {
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+func (b *logBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.buf.String() }
+
+func testLogger(buf *logBuffer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(buf, nil))
 }
 
@@ -27,7 +40,7 @@ func groupGone(pgid int, timeout time.Duration) bool {
 }
 
 func TestStartEnvAndKill(t *testing.T) {
-	var buf bytes.Buffer
+	var buf logBuffer
 	p, err := Start("sh -c 'echo DISPLAY=$DISPLAY; sleep 30'", ":995", testLogger(&buf))
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +78,7 @@ func TestStartEnvAndKill(t *testing.T) {
 }
 
 func TestKillReapsGrandchildren(t *testing.T) {
-	var buf bytes.Buffer
+	var buf logBuffer
 	p, err := Start("sh -c 'sleep 100 & sleep 100'", ":995", testLogger(&buf))
 	if err != nil {
 		t.Fatal(err)

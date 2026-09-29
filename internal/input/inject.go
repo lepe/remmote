@@ -55,7 +55,11 @@ func NewInjector(x *xgb.Conn, km *Keymap, screenW, screenH uint16, log *slog.Log
 	setup := xproto.Setup(x)
 	root := setup.DefaultScreen(x).Root
 	i.fake = func(typ, detail byte, px, py int16) error {
-		return xtest.FakeInputChecked(i.x, typ, detail, 0, root, px, py, 0).Check()
+		// Requests on this connection are ordered. Waiting for a reply here
+		// serializes every mouse/key event behind an extra X round trip.
+		// The server drains asynchronous errors on its input connection.
+		xtest.FakeInput(i.x, typ, detail, 0, root, px, py, 0)
+		return nil
 	}
 	return i, nil
 }

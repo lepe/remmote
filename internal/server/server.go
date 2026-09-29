@@ -34,12 +34,14 @@ type Options struct {
 	Display     string
 	ListenAddr  string
 	FPS         int
+	Downscale   int           // 1, 2 or 4: divide wire dimensions; input stays in host coordinates
 	Quality     int           // 1-100, initial encoder quality
 	Codec       uint8         // proto.CodecJPEG or proto.CodecWebP
 	FullRefresh time.Duration // periodic keyframe interval
 	NoClipboard bool          // disable clipboard synchronization
 	Exec        string        // run this command and share only its windows
 	Window      uint32        // seed the window set with this window id
+	Maximize    bool          // with -exec/-window: maximize the shared window on the host screen
 }
 
 // StreamSource is the capture backend the server streams: the root
@@ -67,6 +69,7 @@ type Server struct {
 	log  *slog.Logger
 
 	xc      *xconn.Conn
+	ixc     *xconn.Conn // input-only: never blocked by capture
 	src     StreamSource
 	inj     *input.Injector
 	rt      *input.Router // input front-end: bare injector (root) or window router
@@ -80,6 +83,7 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[uint64]*session
 	nextID   uint64
+	workers  sync.WaitGroup
 
 	kick chan struct{} // a new session wants a keyframe
 
@@ -89,13 +93,35 @@ type Server struct {
 	encRing [16]time.Duration
 	encIdx  int
 
+	// Capture-loop pacing state (capture-loop goroutine only).
+	lastSend      time.Time // last frame batch start (fps pacing)
+	dirtySinceKey bool      // delta frames sent since the last keyframe
+
 	// Atomic counters reset by the stats ticker.
 	frames   atomic.Int64
 	bytesOut atomic.Int64
+	encZRAW  atomic.Int64
+	encJPEG  atomic.Int64
+	encOther atomic.Int64
 }
 
 // New wires the X stack together. The returned server must be Run.
 func New(opts Options, log *slog.Logger) (*Server, error) {
+	return NewContext(context.Background(), opts, log)
+}
+
+// NewContext also permits cancellation while waiting for a launched app.
+func NewContext(ctx context.Context, opts Options, log *slog.Logger) (*Server, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if opts.Downscale == 0 {
+		opts.Downscale = 1
+	}
+	if opts.Downscale != 1 && opts.Downscale != 2 && opts.Downscale != 4 {
+		return nil, fmt.Errorf("server: downscale must be 1, 2 or 4")
+	}
+
 	if opts.Quality < 1 || opts.Quality > 100 {
 		return nil, fmt.Errorf("server: quality %d out of range 1..100", opts.Quality)
 	}
@@ -125,8 +151,19 @@ func New(opts Options, log *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 	sw, sh := xc.ScreenSize()
-	inj, err := input.NewInjector(xc.X, km, sw, sh, log)
+	// Input gets its own X connection. Sharing the capture connection
+	// serialises every XTEST request behind SHM GetImage and the
+	// geometry round trips of the capture loop, so injection latency
+	// would follow the capture load — on a busy host that is exactly the
+	// "mouse feels laggy" symptom.
+	ixc, err := xconn.Dial(opts.Display)
 	if err != nil {
+		xc.Close()
+		return nil, fmt.Errorf("server: input X connection: %w", err)
+	}
+	inj, err := input.NewInjector(ixc.X, km, sw, sh, log)
+	if err != nil {
+		ixc.Close()
 		xc.Close()
 		return nil, fmt.Errorf("server: XTEST init: %w", err)
 	}
@@ -141,14 +178,21 @@ func New(opts Options, log *slog.Logger) (*Server, error) {
 	)
 	switch {
 	case opts.Exec != "":
-		res, err := launch.Bootstrap(context.Background(),
+		res, err := launch.Bootstrap(ctx,
 			xwin.NewClient(xc.X, xc.Root()), opts.Exec, opts.Display, log)
 		if err != nil {
 			xc.Close()
 			return nil, fmt.Errorf("server: exec %q: %w", opts.Exec, err)
 		}
 		proc = res.Proc
-		seed := capture.SceneSeed{Windows: nil, PID: uint32(res.Proc.Pid()), Class: res.Class}
+		if err := ctx.Err(); err != nil {
+			proc.Kill()
+			ixc.Close()
+			xc.Close()
+			return nil, err
+		}
+		seed := capture.SceneSeed{Windows: nil, PID: uint32(res.Proc.Pid()), Class: res.Class,
+			Maximize: opts.Maximize}
 		if res.Win != 0 {
 			seed.Windows = []xproto.Window{res.Win}
 		}
@@ -158,7 +202,7 @@ func New(opts Options, log *slog.Logger) (*Server, error) {
 			xc.Close()
 			return nil, err
 		}
-		src, router, appName = sc, input.NewRouter(inj, xc.X, sc, log), execName(opts.Exec)
+		src, router, appName = sc, input.NewRouter(inj, ixc.X, sc, log), execName(opts.Exec)
 
 	case opts.Window != 0:
 		// Adopt the seed's WM_CLASS so sibling windows of the same app
@@ -166,14 +210,18 @@ func New(opts Options, log *slog.Logger) (*Server, error) {
 		xq := xwin.NewClient(xc.X, xc.Root())
 		_, class, _ := xq.WMClass(xproto.Window(opts.Window))
 		sc, err := capture.NewScene(xc, capture.Options{FPS: opts.FPS, FullRefresh: opts.FullRefresh},
-			capture.SceneSeed{Windows: []xproto.Window{xproto.Window(opts.Window)}, Class: class}, log)
+			capture.SceneSeed{Windows: []xproto.Window{xproto.Window(opts.Window)}, Class: class,
+				Maximize: opts.Maximize}, log)
 		if err != nil {
 			xc.Close()
 			return nil, err
 		}
-		src, router = sc, input.NewRouter(inj, xc.X, sc, log)
+		src, router = sc, input.NewRouter(inj, ixc.X, sc, log)
 
 	default:
+		if opts.Maximize {
+			log.Warn("-maximize has no effect when sharing the whole desktop; use it with -exec or -window")
+		}
 		cap, err := capture.New(xc, capture.Options{FPS: opts.FPS, FullRefresh: opts.FullRefresh}, log)
 		if err != nil {
 			xc.Close()
@@ -182,7 +230,7 @@ func New(opts Options, log *slog.Logger) (*Server, error) {
 		src = cap
 	}
 	if router == nil {
-		router = input.NewRouter(inj, xc.X, nil, log)
+		router = input.NewRouter(inj, ixc.X, nil, log)
 	}
 
 	enc, err := encode.New(opts.Codec)
@@ -195,10 +243,14 @@ func New(opts Options, log *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 
+	if opts.Downscale > 1 {
+		src = &scaledSource{StreamSource: src, factor: opts.Downscale}
+	}
 	s := &Server{
 		opts:     opts,
 		log:      log,
 		xc:       xc,
+		ixc:      ixc,
 		src:      src,
 		inj:      inj,
 		rt:       router,
@@ -236,13 +288,21 @@ func (s *Server) TestInject() {
 	s.inj.MovePointer(150, 80)
 	s.inj.Key(0x61, true) // 'a'
 	s.inj.Key(0x61, false)
+	s.ixc.X.Sync() // diagnostics exits immediately: wait for queued input
 }
 
 // Run serves until ctx is canceled, then tears everything down. It
 // blocks.
 func (s *Server) Run(ctx context.Context) (err error) {
+	var inputDone, appDone chan struct{}
 	defer func() {
 		s.shutdown()
+		if inputDone != nil {
+			<-inputDone
+		}
+		if appDone != nil {
+			<-appDone
+		}
 	}()
 
 	ln, err := net.Listen("tcp", s.opts.ListenAddr)
@@ -254,25 +314,47 @@ func (s *Server) Run(ctx context.Context) (err error) {
 	r := s.src.ScreenRect()
 	s.log.Info("listening", "addr", ln.Addr().String(),
 		"source", fmt.Sprintf("%dx%d", r.Dx(), r.Dy()),
-		"codec", proto.CodecName(s.enc.Codec()), "fps", s.src.FPS())
+		"codec", codecName(s.enc.Codec()), "fps", s.src.FPS())
 
 	if s.proc != nil {
+		appDone = make(chan struct{})
 		go func() {
+			defer close(appDone)
 			<-s.proc.Done()
-			s.log.Info("application exited; server staying up", "err", s.proc.Err())
+			if ctx.Err() == nil {
+				s.log.Info("application exited; server staying up", "err", s.proc.Err())
+			}
 		}()
 	}
-	go s.acceptLoop(ctx, ln)
-	go s.captureLoop(ctx)
-	go s.statsLoop(ctx)
-	go s.pingLoop(ctx)
+	// Unchecked input requests preserve X ordering without a round trip per
+	// event. Drain asynchronous protocol errors on the dedicated connection.
+	inputDone = make(chan struct{})
+	go func() {
+		defer close(inputDone)
+		for {
+			ev, err := s.ixc.X.WaitForEvent()
+			if err != nil {
+				s.log.Warn("input X error", "err", err)
+			}
+			if ev == nil && err == nil {
+				return
+			}
+		}
+	}()
 	s.startClipboard(ctx)
+	s.workers.Add(4)
+	go func() { defer s.workers.Done(); s.acceptLoop(ctx, ln) }()
+	go func() { defer s.workers.Done(); s.captureLoop(ctx) }()
+	go func() { defer s.workers.Done(); s.statsLoop(ctx) }()
+	go func() { defer s.workers.Done(); s.pingLoop(ctx) }()
 
 	<-ctx.Done()
 	s.log.Info("shutting down")
+	_ = ln.Close() // wake Accept before waiting for connection handlers
 	if s.clip != nil {
 		s.clip.Close()
 	}
+	s.workers.Wait() // no capture or input may touch X/SHM after this point
 	return nil
 }
 
@@ -290,14 +372,18 @@ func (s *Server) startClipboard(ctx context.Context) {
 	}
 	s.clip = w
 	s.log.Info("clipboard sync enabled")
-	go w.Run(ctx, func(text string) {
-		if len(text) > proto.MaxClipboard {
-			return
-		}
-		s.forEachSession(func(sess *session) {
-			sess.deliver(newFrame(proto.MsgClipboard, 0, (&proto.ClipboardData{Text: text}).Encode(), false))
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		w.Run(ctx, func(text string) {
+			if len(text) > proto.MaxClipboard {
+				return
+			}
+			s.forEachSession(func(sess *session) {
+				sess.deliver(newFrame(proto.MsgClipboard, 0, (&proto.ClipboardData{Text: text}).Encode(), false))
+			})
 		})
-	})
+	}()
 }
 
 func (s *Server) acceptLoop(ctx context.Context, ln net.Listener) {
@@ -306,24 +392,60 @@ func (s *Server) acceptLoop(ctx context.Context, ln net.Listener) {
 		if err != nil {
 			return // listener closed (shutdown)
 		}
-		go s.handleConn(ctx, conn)
+		if ctx.Err() != nil {
+			conn.Close()
+			return
+		}
+		s.workers.Add(1)
+		go func() { defer s.workers.Done(); s.handleConn(ctx, conn) }()
 	}
 }
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer conn.Close()
+	finished := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-finished:
+			return
+		case <-ctx.Done():
+		}
+		_ = conn.SetReadDeadline(time.Now())
+		// A writer may be blocked in a frame write. Allow a brief goodbye,
+		// then force-close even when that peer never reads again.
+		timer := time.NewTimer(shutdownGrace)
+		defer timer.Stop()
+		select {
+		case <-finished:
+		case <-timer.C:
+			conn.Close()
+		}
+	}()
+	defer func() { close(finished); <-watcherDone }()
 	sess, err := s.handshake(conn)
 	if err != nil {
-		s.log.Warn("handshake failed", "remote", conn.RemoteAddr(), "err", err)
-		conn.Close()
+		if ctx.Err() == nil {
+			s.log.Warn("handshake failed", "remote", conn.RemoteAddr(), "err", err)
+		}
+		return
+	}
+	defer s.deregister(sess)
+	if ctx.Err() != nil {
 		return
 	}
 	s.register(sess)
-	defer s.deregister(sess)
-
 	s.log.Info("client connected", "remote", conn.RemoteAddr(), "id", sess.id)
-	go sess.writer(ctx)
-	sess.reader(ctx) // blocks until the client goes away
-	sess.stop("client disconnected")
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() { defer workers.Done(); sess.writer(ctx) }()
+	go func() { defer workers.Done(); sess.pump.run(ctx) }()
+	sess.reader(ctx)
+	cancel()
+	workers.Wait()
 	s.log.Info("client gone", "remote", conn.RemoteAddr(), "id", sess.id,
 		"frames", sess.framesOut.Load(), "dropped", sess.dropped.Load())
 }
@@ -331,7 +453,9 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 func (s *Server) handshake(conn net.Conn) (*session, error) {
 	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
-		_ = tc.SetWriteBuffer(4 << 20)
+		// Bound stale frames already handed to TCP; a multi-MiB buffer can
+		// hide seconds of desktop updates from the bounded outbox.
+		_ = tc.SetWriteBuffer(256 << 10)
 		_ = tc.SetReadBuffer(1 << 20)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -417,19 +541,20 @@ func (s *Server) forEachSession(fn func(*session)) {
 }
 
 func (s *Server) shutdown() {
-	s.forEachSession(func(sess *session) { sess.stop("server shutting down") })
 	if s.proc != nil {
 		s.proc.Kill()
 	}
 	if err := s.src.Close(); err != nil {
 		s.log.Warn("capturer close", "err", err)
 	}
+	s.ixc.Close()
 	s.xc.Close()
 }
 
 // captureLoop paces frame production: damage-driven with an fps-capped
-// merge window, plus periodic keyframes and resize handling. It is the
-// only goroutine that captures.
+// merge window, plus keyframes on resize, client join, dropped frames, and
+// (when anything changed) the periodic refresh ticker. It is the only
+// goroutine that captures.
 func (s *Server) captureLoop(ctx context.Context) {
 	minInterval := time.Second / time.Duration(s.src.FPS())
 	ticker := time.NewTicker(s.src.FullRefresh())
@@ -450,22 +575,34 @@ func (s *Server) captureLoop(ctx context.Context) {
 				(&proto.ScreenResize{Width: uint16(rect.Dx()), Height: uint16(rect.Dy())}).Encode(), false))
 			s.sendKeyframe()
 		case <-ticker.C:
-			s.sendKeyframe()
+			// Keyframes exist to heal drift: with no deltas since the
+			// last one there is nothing to heal, so an idle desktop
+			// costs no capture, no encode, no bandwidth. Without damage
+			// tracking the ticker is the only frame source — stay
+			// unconditional there.
+			if s.dirtySinceKey || !s.src.HasDamage() {
+				s.sendKeyframe()
+			}
 		case <-s.src.Changed():
 			if !s.src.HasDamage() {
 				continue // no tracking: ticker supplies full frames
 			}
-			// Merge window = one frame interval; damage arriving now
-			// unions into the bbox we are about to take.
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(minInterval):
+			// Merge window: cap the frame rate by waiting out the
+			// remainder of the interval since the last batch — never a
+			// full interval, so an update after an idle gap goes out
+			// immediately.
+			if wait := minInterval - time.Since(s.lastSend); wait > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
 			}
 			rects := s.src.TakePending()
 			if len(rects) == 0 {
 				continue
 			}
+			s.lastSend = time.Now()
 			union := image.Rectangle{}
 			for _, r := range rects {
 				union = union.Union(r)
@@ -476,6 +613,7 @@ func (s *Server) captureLoop(ctx context.Context) {
 				for _, r := range rects {
 					s.sendFrame(r, false)
 				}
+				s.dirtySinceKey = true
 			}
 		}
 		// Anyone who dropped frames gets a keyframe now.
@@ -497,6 +635,7 @@ func (s *Server) takeNeedsKeyframe() bool {
 
 // sendKeyframe captures and broadcasts the full screen.
 func (s *Server) sendKeyframe() {
+	s.lastSend = time.Now()
 	s.sendFrame(s.src.ScreenRect(), true)
 }
 
@@ -511,7 +650,7 @@ func (s *Server) sendFrame(r image.Rectangle, keyframe bool) {
 		return
 	}
 	t0 := time.Now()
-	data, err := s.enc.Encode(img, int(s.quality.Load()))
+	codec, data, err := s.enc.Encode(img, int(s.quality.Load()))
 	s.recordEncode(time.Since(t0))
 	if err != nil {
 		s.log.Warn("encode", "err", err)
@@ -524,15 +663,24 @@ func (s *Server) sendFrame(r image.Rectangle, keyframe bool) {
 		Y:     uint16(r.Min.Y),
 		W:     uint16(r.Dx()),
 		H:     uint16(r.Dy()),
-		Codec: s.enc.Codec(),
+		Codec: codec,
 		Data:  data,
 	}
 	flags := uint8(0)
 	if keyframe {
 		flags = proto.FlagKeyframe
+		s.dirtySinceKey = false
 	}
 	s.frames.Add(1)
 	s.bytesOut.Add(int64(len(data)))
+	switch codec {
+	case proto.CodecZRAW:
+		s.encZRAW.Add(1)
+	case proto.CodecJPEG:
+		s.encJPEG.Add(1)
+	default:
+		s.encOther.Add(1)
+	}
 	s.broadcast(newFrame(proto.MsgRectUpdate, flags, msg.Encode(), keyframe))
 }
 
@@ -571,15 +719,30 @@ func (s *Server) statsLoop(ctx context.Context) {
 		case <-ticker.C:
 			frames := s.frames.Swap(0)
 			bytes := s.bytesOut.Swap(0)
+			zraw := s.encZRAW.Swap(0)
+			jpeg := s.encJPEG.Swap(0)
+			other := s.encOther.Swap(0)
 			var drops uint64
 			n := 0
+			var inEvents, inMoves, inDropped int64
+			var inWaitMax time.Duration
 			s.forEachSession(func(sess *session) {
 				n++
 				drops += sess.dropped.Load()
+				st := sess.pump.takeInputStats()
+				inEvents += st.events
+				inMoves += st.moves
+				inDropped += st.dropped
+				if st.waitMax > inWaitMax {
+					inWaitMax = st.waitMax
+				}
 			})
 			s.log.Info("stats", "clients", n, "frames", frames,
 				"kbps", bytes/10240, // bytes per 10 s → kB/s
 				"encode_p95ms", s.encodeP95().Milliseconds(),
+				"zraw", zraw, "jpeg", jpeg, "other", other,
+				"in_events", inEvents, "in_moves", inMoves,
+				"in_wait_maxms", inWaitMax.Milliseconds(),
 				"dropped", drops)
 		}
 	}
@@ -604,4 +767,14 @@ func (s *Server) encodeP95() time.Duration {
 		}
 	}
 	return ds[(len(ds)*95-1)/100]
+}
+
+// codecName labels the configured encoder for logs; the hybrid
+// pseudo-codec never appears on the wire, so proto.CodecName doesn't
+// cover it.
+func codecName(c uint8) string {
+	if c == encode.CodecHybrid {
+		return "hybrid"
+	}
+	return proto.CodecName(c)
 }

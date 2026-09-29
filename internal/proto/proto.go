@@ -7,8 +7,12 @@ import "errors"
 
 const (
 	// ProtoVersion is the wire protocol version this build speaks.
-	// v2 added the Clipboard message.
-	ProtoVersion uint16 = 2
+	// v2 added the Clipboard message; v3 added the ZRAW codec byte.
+	//
+	// The server refuses mismatched versions, so adding a wire value that
+	// older clients cannot decode (ZRAW) requires a bump: without it a v2
+	// client would complete the handshake and then drop every rect.
+	ProtoVersion uint16 = 3
 
 	// HeaderSize is the fixed frame header: 'R','M',type,flags,length u32.
 	HeaderSize = 8
@@ -78,6 +82,10 @@ const FlagKeyframe uint8 = 1 << 0
 const (
 	CodecJPEG uint8 = 1
 	CodecWebP uint8 = 2
+	// CodecZRAW is zstd-compressed raw RGBA pixels (w*h*4 bytes after
+	// decompression). Cheap enough on CPU that it beats JPEG end-to-end
+	// for typical desktop content.
+	CodecZRAW uint8 = 3
 )
 
 func CodecName(c uint8) string {
@@ -86,6 +94,8 @@ func CodecName(c uint8) string {
 		return "jpeg"
 	case CodecWebP:
 		return "webp"
+	case CodecZRAW:
+		return "zraw"
 	default:
 		return "unknown"
 	}

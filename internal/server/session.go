@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"net"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,7 +25,10 @@ func newFrame(typ proto.MsgType, flags uint8, payload []byte, keyframe bool) *fr
 	return &frame{typ: typ, flags: flags, payload: payload, keyframe: keyframe}
 }
 
-const outboxCap = 4
+// outboxCap bounds the per-client frame queue. Frames share their encoded
+// payload, but retaining many old frames increases visual latency under
+// load. Keep only a short backlog, recovering dropped deltas with a keyframe.
+const outboxCap = 2
 
 // session is one connected client: a TCP conn with a reader (input
 // events in), a writer (frames out), and a bounded frame queue between
@@ -37,9 +39,7 @@ type session struct {
 	conn net.Conn
 	br   *bufio.Reader // carries bytes buffered during the handshake
 	out  chan *frame
-
-	stopOnce sync.Once
-	done     chan struct{}
+	pump *inputPump
 
 	needKey   atomic.Bool
 	dropped   atomic.Uint64
@@ -53,7 +53,7 @@ func newSession(srv *Server, id uint64, conn net.Conn, br *bufio.Reader) *sessio
 		conn: conn,
 		br:   br,
 		out:  make(chan *frame, outboxCap),
-		done: make(chan struct{}),
+		pump: newInputPump(srv.rt),
 	}
 }
 
@@ -87,24 +87,16 @@ func (sess *session) deliver(f *frame) {
 	}
 }
 
-// stop closes the connection and signals the writer to say goodbye.
-// Idempotent.
-func (sess *session) stop(reason string) {
-	sess.stopOnce.Do(func() {
-		close(sess.done)
-		// Give the writer a brief window to flush a goodbye, then yank.
-		go func() {
-			select {
-			case <-time.After(2 * time.Second):
-			}
-			sess.conn.Close()
-		}()
-	})
-}
+const shutdownGrace = 250 * time.Millisecond
 
-// reader consumes client messages until the client goes away.
+// reader consumes client messages until the client goes away. Input is
+// handed to the session's inputPump rather than injected inline, so a
+// fast mouse cannot build a backlog ahead of a click or keystroke.
 func (sess *session) reader(ctx context.Context) {
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		_ = sess.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		t, _, payload, err := proto.ReadMsg(sess.br)
 		if err != nil {
@@ -113,22 +105,22 @@ func (sess *session) reader(ctx context.Context) {
 		switch t {
 		case proto.MsgMouseMove:
 			if m, err := proto.DecodeMouseMove(payload); err == nil {
-				sess.srv.rt.MovePointer(int(m.X), int(m.Y))
+				sess.pump.moveTo(int(m.X)*max(1, sess.srv.opts.Downscale), int(m.Y)*max(1, sess.srv.opts.Downscale))
 			}
 		case proto.MsgMouseButton:
 			if m, err := proto.DecodeMouseButton(payload); err == nil {
-				sess.srv.rt.Button(m.Button, m.Down)
+				sess.pump.enqueue(ctx, inEvent{kind: kindButton, b: m.Button, down: m.Down})
 			}
 		case proto.MsgWheel:
 			if m, err := proto.DecodeWheel(payload); err == nil {
-				sess.srv.rt.Wheel(int(m.DX), int(m.DY))
+				sess.pump.enqueue(ctx, inEvent{kind: kindWheel, x: int(m.DX), y: int(m.DY)})
 			}
 		case proto.MsgKey:
 			if m, err := proto.DecodeKey(payload); err == nil {
-				sess.srv.rt.Key(xproto.Keysym(m.Keysym), m.Down)
+				sess.pump.enqueue(ctx, inEvent{kind: kindKey, ks: xproto.Keysym(m.Keysym), down: m.Down})
 			}
 		case proto.MsgSetQuality:
-			if m, err := proto.DecodeSetQuality(payload); err == nil && m.Quality >= 1 {
+			if m, err := proto.DecodeSetQuality(payload); err == nil && m.Quality >= 1 && m.Quality <= 100 {
 				sess.srv.quality.Store(int32(m.Quality))
 				sess.srv.log.Info("quality changed", "quality", m.Quality, "client", sess.id)
 			}
@@ -150,6 +142,7 @@ func (sess *session) reader(ctx context.Context) {
 
 // writer drains the outbox to the client.
 func (sess *session) writer(ctx context.Context) {
+	defer sess.conn.Close()
 	bw := bufio.NewWriter(sess.conn)
 	for {
 		select {
@@ -157,20 +150,19 @@ func (sess *session) writer(ctx context.Context) {
 			sess.sayBye(bw, proto.CloseShutdown, "server shutting down")
 			sess.conn.Close()
 			return
-		case <-sess.done:
-			sess.sayBye(bw, proto.CloseShutdown, "session closed")
-			sess.conn.Close()
-			return
 		case f := <-sess.out:
 			_ = sess.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := proto.WriteMsg(bw, f.typ, f.flags, f.payload); err != nil {
-				sess.srv.log.Warn("client write failed (slow client?)",
-					"client", sess.id, "err", err)
+				if ctx.Err() == nil {
+					sess.srv.log.Warn("client write failed (slow client?)", "client", sess.id, "err", err)
+				}
 				sess.conn.Close()
 				return
 			}
 			if err := bw.Flush(); err != nil {
-				sess.srv.log.Warn("client flush failed", "client", sess.id, "err", err)
+				if ctx.Err() == nil {
+					sess.srv.log.Warn("client flush failed", "client", sess.id, "err", err)
+				}
 				sess.conn.Close()
 				return
 			}
@@ -179,7 +171,7 @@ func (sess *session) writer(ctx context.Context) {
 }
 
 func (sess *session) sayBye(bw *bufio.Writer, code uint8, reason string) {
-	_ = sess.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	_ = sess.conn.SetWriteDeadline(time.Now().Add(shutdownGrace))
 	c := &proto.Close{Code: code, Reason: reason}
 	if err := proto.WriteMsg(bw, proto.MsgClose, 0, c.Encode()); err == nil {
 		_ = bw.Flush()

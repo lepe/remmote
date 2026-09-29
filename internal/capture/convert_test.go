@@ -127,3 +127,107 @@ func TestConvertBounds(t *testing.T) {
 		t.Error("expected error for short dst")
 	}
 }
+
+// RegionToBGRA is the client blit's sub-rect path: the window rows it
+// converts land at dstStride apart inside a full-window SHM segment, so
+// both the pixel order and the row placement must be exact.
+func TestRegionToBGRA(t *testing.T) {
+	const W, H = 9, 7
+	src := image.NewRGBA(image.Rect(0, 0, W, H))
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			src.SetRGBA(x, y, color.RGBA{R: uint8(x + 1), G: uint8(y + 1), B: uint8(x + y), A: 0xFF})
+		}
+	}
+	r := image.Rect(2, 1, 7, 5) // 5x4 region
+	w, h := r.Dx(), r.Dy()
+	const stride = 24 // > 20-byte rows: padding between rows, like a segment
+
+	for _, lsb := range []bool{true, false} {
+		dst := make([]byte, stride*(h-1)+w*4)
+		for i := range dst { // poison padding so an over-write is visible
+			dst[i] = 0xEE
+		}
+		if err := RegionToBGRA(dst, stride, src, r, lsb); err != nil {
+			t.Fatalf("lsb=%v: %v", lsb, err)
+		}
+		for row := 0; row < h; row++ {
+			got := dst[row*stride : row*stride+w*4]
+			rowRect := image.Rect(r.Min.X, r.Min.Y+row, r.Max.X, r.Min.Y+row+1)
+			want := make([]byte, w*4)
+			if err := RGBAToBGRA(want, src.SubImage(rowRect).(*image.RGBA), w, 1, lsb); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("lsb=%v row %d = % x, want % x", lsb, row, got, want)
+			}
+			if row < h-1 {
+				for i, b := range dst[row*stride+w*4 : (row+1)*stride] {
+					if b != 0xEE {
+						t.Fatalf("lsb=%v row %d padding byte %d = %#x, want untouched", lsb, row, i, b)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestRegionToBGRAErrors(t *testing.T) {
+	src := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	r := image.Rect(2, 2, 6, 6) // 4x4 → needs stride*3 + 16 bytes
+	if err := RegionToBGRA(make([]byte, 10), 16, src, r, true); err == nil {
+		t.Error("expected error for short dst")
+	}
+	if err := RegionToBGRA(make([]byte, 256), 16, src, image.Rect(6, 6, 10, 10), true); err == nil {
+		t.Error("expected error for region outside src")
+	}
+	// A stride below one row would make rows overlap and silently corrupt
+	// the last pixel of every row — it must be rejected, not accepted.
+	if err := RegionToBGRA(make([]byte, 256), 12, src, r, true); err == nil {
+		t.Error("expected error for dst stride < row bytes")
+	}
+	// Empty rects are a no-op, not a panic (words() indexes b[0]).
+	if err := RegionToBGRA(nil, 0, src, image.Rect(3, 3, 3, 5), true); err != nil {
+		t.Errorf("empty region: %v", err)
+	}
+}
+
+// Zero-width or zero-height rects must be no-ops across all three
+// converters rather than panicking inside the word-wise fast path.
+func TestConvertEmptyRectNoOp(t *testing.T) {
+	dst := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	if err := BGRAToRGBA(dst, nil, 0, 4, true); err != nil {
+		t.Errorf("BGRAToRGBA 0x4: %v", err)
+	}
+	if err := RGBAToBGRA(nil, dst, 4, 0, true); err != nil {
+		t.Errorf("RGBAToBGRA 4x0: %v", err)
+	}
+	for i, b := range dst.Pix {
+		if b != 0 {
+			t.Fatalf("pixel byte %d = %#x, want untouched", i, b)
+		}
+	}
+}
+
+func TestRegionToBGRANonZeroImageOrigin(t *testing.T) {
+	parent := image.NewRGBA(image.Rect(-10, -20, 30, 40))
+	for y := -20; y < 40; y++ {
+		for x := -10; x < 30; x++ {
+			parent.SetRGBA(x, y, color.RGBA{byte(x + 10), byte(y + 20), 37, 255})
+		}
+	}
+	src := parent.SubImage(image.Rect(-3, -7, 20, 30)).(*image.RGBA)
+	r := image.Rect(1, 2, 8, 9)
+	for _, lsb := range []bool{true, false} {
+		got, want := make([]byte, r.Dx()*r.Dy()*4), make([]byte, r.Dx()*r.Dy()*4)
+		if err := RegionToBGRA(got, r.Dx()*4, src, r, lsb); err != nil {
+			t.Fatal(err)
+		}
+		if err := RGBAToBGRA(want, parent.SubImage(r).(*image.RGBA), r.Dx(), r.Dy(), lsb); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("incorrect subimage pixels (lsb=%v)", lsb)
+		}
+	}
+}

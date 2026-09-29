@@ -28,9 +28,10 @@ const rejectCooldown = 2 * time.Second
 
 // SceneSeed seeds a Scene with the initial tracked window set.
 type SceneSeed struct {
-	Windows []xproto.Window // initial tracked windows
-	PID     uint32          // child process id for _NET_WM_PID matching (0 = none)
-	Class   string          // seed WM_CLASS res_class ("" = unknown)
+	Windows  []xproto.Window // initial tracked windows
+	PID      uint32          // child process id for _NET_WM_PID matching (0 = none)
+	Class    string          // seed WM_CLASS res_class ("" = unknown)
+	Maximize bool            // maximize the main window on the host screen once it is viewable
 }
 
 // trackedWin is one window of the shared application.
@@ -66,13 +67,21 @@ type Scene struct {
 
 	pred xwin.Predicates // PID + SeedClass (Tracked filled per call)
 
-	mu         sync.Mutex
-	windows    []*trackedWin     // stacking order, bottom → top
-	canvas     image.Rectangle   // root coordinates; Min is the canvas origin
-	scratch    *image.RGBA       // canvas-sized composite (capture-loop only)
-	pending    []image.Rectangle // structural dirty, canvas coords
-	stackDirty bool
-	rejected   map[xproto.Window]time.Time
+	mu            sync.Mutex
+	windows       []*trackedWin     // stacking order, bottom → top
+	canvas        image.Rectangle   // root coordinates; Min is the canvas origin
+	scratch       *image.RGBA       // canvas-sized composite (capture-loop only)
+	pending       []image.Rectangle // structural dirty, canvas coords
+	pendingShrink image.Rectangle   // proposed shrink target, awaiting confirmation
+	shrinkAt      time.Time         // when pendingShrink was first proposed
+	stackDirty    bool
+	rejected      map[xproto.Window]time.Time
+
+	// -maximize state, applied at most once: the window to maximize once
+	// it becomes viewable, or 0 for the first one that does. Guarded by mu.
+	maximize       bool
+	maximizeTarget xproto.Window
+	maximizeDone   bool
 
 	seg       *SHMSegment
 	segID     shm.Seg
@@ -98,19 +107,28 @@ func NewScene(xc *xconn.Conn, opts Options, seed SceneSeed, log *slog.Logger) (*
 	if _, err := damage.QueryVersion(xc.X, 1, 1).Reply(); err != nil {
 		return nil, fmt.Errorf("scene: damage query version: %w", err)
 	}
+	// With -maximize the target is the seed window; when no window was
+	// found yet (an app that appears late, or a single-instance handoff)
+	// the first window to become viewable takes its place.
+	var target xproto.Window
+	if len(seed.Windows) > 0 {
+		target = seed.Windows[0]
+	}
 	s := &Scene{
-		xc:         xc,
-		log:        log,
-		opts:       opts,
-		xq:         xwin.NewClient(xc.X, xc.Root()),
-		pred:       xwin.Predicates{PID: seed.PID, SeedClass: seed.Class},
-		canvas:     image.Rect(0, 0, 1, 1),
-		rejected:   make(map[xproto.Window]time.Time),
-		changed:    make(chan struct{}, 1),
-		resized:    make(chan struct{}, 1),
-		candidates: make(chan xproto.Window, 64),
-		destroyed:  make(chan xproto.Window, 64),
-		quit:       make(chan struct{}),
+		xc:             xc,
+		log:            log,
+		opts:           opts,
+		xq:             xwin.NewClient(xc.X, xc.Root()),
+		pred:           xwin.Predicates{PID: seed.PID, SeedClass: seed.Class},
+		maximize:       seed.Maximize,
+		maximizeTarget: target,
+		canvas:         image.Rect(0, 0, 1, 1),
+		rejected:       make(map[xproto.Window]time.Time),
+		changed:        make(chan struct{}, 1),
+		resized:        make(chan struct{}, 1),
+		candidates:     make(chan xproto.Window, 64),
+		destroyed:      make(chan xproto.Window, 64),
+		quit:           make(chan struct{}),
 	}
 	if err := s.xq.SelectSubstructureNotifyRoot(); err != nil {
 		return nil, fmt.Errorf("scene: root substructure notify: %w", err)
@@ -131,6 +149,16 @@ func NewScene(xc *xconn.Conn, opts Options, seed SceneSeed, log *slog.Logger) (*
 
 // FPS is the configured frame cap.
 func (s *Scene) FPS() int { return s.opts.FPS }
+
+// framePeriod is one frame at the configured cap — how long a shrink
+// target must stay stable before recomputeCanvas applies it.
+func (s *Scene) framePeriod() time.Duration {
+	fps := s.opts.FPS
+	if fps <= 0 {
+		fps = 30
+	}
+	return time.Second / time.Duration(fps)
+}
 
 // FullRefresh is the configured keyframe interval.
 func (s *Scene) FullRefresh() time.Duration { return s.opts.FullRefresh }
@@ -495,6 +523,7 @@ func (s *Scene) track(w xproto.Window) {
 		t.rect = rect
 	}
 	t.mapped = s.xq.IsViewable(w)
+	viewable := t.mapped
 
 	s.mu.Lock()
 	s.windows = append(s.windows, t)
@@ -506,6 +535,32 @@ func (s *Scene) track(w xproto.Window) {
 	s.addPendingCanvas(rect.Sub(s.canvas.Min))
 	s.mu.Unlock()
 	s.signal(s.changed)
+	if viewable {
+		s.maybeMaximize(w)
+	}
+}
+
+// maybeMaximize applies the one-shot -maximize request to w: it runs for
+// the target window the first time that window is seen viewable, and
+// never again. Waiting for viewable is deliberate — with -exec the window
+// is often found before it maps (a single-instance app's window appears
+// only after its launcher exits), and a request for an unmapped window is
+// one the window manager may well discard. Issues X requests, so callers
+// must not hold s.mu.
+func (s *Scene) maybeMaximize(w xproto.Window) {
+	s.mu.Lock()
+	if !s.maximize || s.maximizeDone || (s.maximizeTarget != 0 && s.maximizeTarget != w) {
+		s.mu.Unlock()
+		return
+	}
+	s.maximizeDone = true
+	s.mu.Unlock()
+	mode, err := s.xq.Maximize(w)
+	if err != nil {
+		s.log.Warn("maximize failed", "window", uint32(w), "mode", mode, "err", err)
+		return
+	}
+	s.log.Info("maximized window", "window", uint32(w), "mode", mode)
 }
 
 // removeWindow drops a window from the tracked set.
@@ -595,6 +650,53 @@ func (s *Scene) rescan() {
 			s.consider(w)
 		}
 	}
+
+	// Re-read viewability as the backstop for a MapNotify that never
+	// reached us (see refreshMapped).
+	if s.refreshMapped() {
+		s.dirtyAll()
+		s.signal(s.changed)
+		s.signal(s.resized)
+	}
+}
+
+// refreshMapped re-reads viewability for every tracked window and reports
+// whether any changed. A window's mapped flag is otherwise written only
+// when track() first sees it and when a MapNotify/UnmapNotify arrives —
+// but a MapNotify generated before track() selected StructureNotify is
+// already gone, and with a reparenting WM the client window can be mapped
+// while its frame is not, so that one-shot read can land on false. Without
+// this the window stays "unmapped" for the life of the session, its rect
+// stays out of the canvas bbox, and the viewer shows an empty canvas
+// forever. Called only from the capture loop, so the round trips are safe.
+func (s *Scene) refreshMapped() bool {
+	s.mu.Lock()
+	ids := make([]xproto.Window, 0, len(s.windows))
+	for _, t := range s.windows {
+		ids = append(ids, t.id)
+	}
+	s.mu.Unlock()
+
+	changed := false
+	for _, id := range ids {
+		viewable := s.xq.IsViewable(id)
+		s.mu.Lock()
+		for _, t := range s.windows {
+			if t.id == id {
+				if setMapped(t, viewable) {
+					changed = true
+				}
+				break
+			}
+		}
+		s.mu.Unlock()
+		// A window that became viewable after we first saw it gets its
+		// one-shot maximize here too, so a lost MapNotify cannot strand it.
+		if viewable {
+			s.maybeMaximize(id)
+		}
+	}
+	return changed
 }
 
 // rootAncestorOrder finds the stacking index of the window's root-level
@@ -617,6 +719,17 @@ func (s *Scene) rootAncestorOrder(w xproto.Window, order map[xproto.Window]int) 
 // 32 px grid) and reallocates buffers when it changed. The canvas never
 // shrinks to nothing: with no mapped windows the last canvas is kept so
 // the retained scratch (last frame) keeps streaming.
+//
+// Shrinks are debounced for one frame period: killing an application
+// unmaps all of its windows back-to-back, and a recompute landing
+// between two unmaps would otherwise resize the canvas to a transient
+// subset — the retained frame then becomes a fragment of the real one.
+// A shrink applies only once the same smaller target has been proposed
+// continuously for a full frame. The multiple recomputes inside one
+// ApplyResize are microseconds apart and never confirm each other; a
+// genuine close confirms on the next damage/configure signal, or at the
+// latest on the next rescanTick (rescanInterval), so the canvas can stay
+// one window larger than strictly needed for up to that long.
 func (s *Scene) recomputeCanvas() {
 	rootW, rootH := s.xc.ScreenSize()
 	root := image.Rect(0, 0, int(rootW), int(rootH))
@@ -627,17 +740,32 @@ func (s *Scene) recomputeCanvas() {
 			bbox = bbox.Union(t.rect)
 		}
 	}
-	s.mu.Unlock()
 	if bbox.Empty() {
+		s.pendingShrink = image.Rectangle{}
+		s.mu.Unlock()
 		return
 	}
 	bbox = quantizeOutward(bbox.Intersect(root))
 
-	s.mu.Lock()
-	if bbox == s.canvas {
+	switch {
+	case bbox == s.canvas:
+		s.pendingShrink = image.Rectangle{}
 		s.mu.Unlock()
 		return
+	case bbox.In(s.canvas):
+		// Subset of the current canvas: propose, don't apply yet.
+		if s.pendingShrink != bbox {
+			s.pendingShrink = bbox
+			s.shrinkAt = time.Now()
+			s.mu.Unlock()
+			return
+		}
+		if time.Since(s.shrinkAt) < s.framePeriod() {
+			s.mu.Unlock()
+			return // not stable long enough yet
+		}
 	}
+	s.pendingShrink = image.Rectangle{}
 	s.canvas = bbox
 	s.mu.Unlock()
 
@@ -757,6 +885,7 @@ func (s *Scene) HandleEvent(ev xgb.Event) {
 
 	case xproto.MapNotifyEvent:
 		if s.markMapped(e.Window, true) {
+			s.maybeMaximize(e.Window)
 			s.signal(s.changed)
 			s.signal(s.resized)
 		} else {
@@ -800,15 +929,24 @@ func (s *Scene) markMapped(w xproto.Window, mapped bool) bool {
 	defer s.mu.Unlock()
 	for _, t := range s.windows {
 		if t.id == w {
-			if t.mapped != mapped {
-				t.mapped = mapped
-				t.stale = true
-				t.dirty = unionRect(t.dirty, image.Rect(0, 0, 65535, 65535))
-			}
+			setMapped(t, mapped)
 			return true
 		}
 	}
 	return false
+}
+
+// setMapped records a viewability reading on t and reports whether it
+// changed. A real change repaints the window and re-evaluates the canvas
+// bbox. Caller holds s.mu.
+func setMapped(t *trackedWin, mapped bool) bool {
+	if t.mapped == mapped {
+		return false
+	}
+	t.mapped = mapped
+	t.stale = true
+	t.dirty = unionRect(t.dirty, image.Rect(0, 0, 65535, 65535))
+	return true
 }
 
 func (s *Scene) pushCandidate(w xproto.Window) {

@@ -15,8 +15,10 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"sync"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"golang.org/x/image/webp"
 
 	"github.com/lepe/remmote/internal/clipboard"
@@ -26,49 +28,116 @@ import (
 
 // Options configures the client.
 type Options struct {
-	Display     string
-	ServerAddr  string
-	Quality     int    // 0 = keep server default; 1-100 sends SetQuality
-	Once        bool   // exit after the first keyframe (CI mode)
-	Snapshot    string // with Once: write the first full frame as PNG
-	NoClipboard bool   // disable clipboard synchronization
+	Display       string
+	ServerAddr    string
+	FastScale     bool          // use nearest-neighbor viewer scaling
+	Upscale       int           // 1, 2 or 4: magnify a downscaled stream back to host resolution (match the server's -downscale)
+	Quality       int           // 0 = keep server default; 1-100 sends SetQuality
+	Once          bool          // exit after the first keyframe (CI mode)
+	Snapshot      string        // with Once: write the first full frame as PNG
+	SnapshotAfter time.Duration // >0: run live for D, then write the composited canvas as PNG and exit (CI mode; exercises keyframe + delta updates)
+	NoClipboard   bool          // disable clipboard synchronization
 }
 
 // Run drives the client until the window closes or ctx is canceled.
-func Run(ctx context.Context, opts Options, log *slog.Logger) error {
+func Run(ctx context.Context, opts Options, log *slog.Logger) (err error) {
+	callerCtx := ctx
+	defer func() {
+		if callerCtx.Err() != nil {
+			err = nil
+		}
+	}()
+	// A zero Upscale means the default (1), so a bare Options{} is valid —
+	// the same normalization server.Options.Downscale gets.
+	if opts.Upscale == 0 {
+		opts.Upscale = 1
+	}
+	if opts.Upscale != 1 && opts.Upscale != 2 && opts.Upscale != 4 {
+		return fmt.Errorf("client: -upscale must be 1, 2 or 4")
+	}
 	if opts.Once {
 		return runOnce(ctx, opts, log)
 	}
 
+	// Cancelable so the snapshot-after timer can stop the session.
+	ctx, cancel := context.WithCancel(ctx)
+
+	// One upscaler for the whole session: it owns the scratch buffer, so
+	// a reconnect must not throw the allocation away.
+	up := newUpscaler(opts.Upscale)
+
 	// Interactive mode: the window lives across reconnects.
 	var win *viewer.Window
-	outbound := make(chan outMsg, 64)
+	var winMu sync.Mutex // win read by the snapshot goroutine
+	q := newOutQueue(64, log)
+	q.ctx = ctx
 	winClosed := make(chan error, 1)
 	var haveWindow bool
 
 	// Clipboard watcher on the viewer's display: local copies go to the
 	// server, remote text becomes the local clipboard.
 	var clip *clipboard.Watcher
+	var workers sync.WaitGroup
+	defer func() {
+		cancel() // unblock queue producers before closing the event connection
+		if clip != nil {
+			clip.Close()
+		}
+		if win != nil {
+			win.Close()
+		}
+		workers.Wait()
+	}()
 	if !opts.NoClipboard {
 		if w, err := clipboard.New(opts.Display, 0, log); err != nil {
 			log.Warn("clipboard sync unavailable", "err", err)
 		} else {
 			clip = w
-			defer w.Close()
 			log.Info("clipboard sync enabled")
-			go w.Run(ctx, func(text string) {
-				select {
-				case outbound <- outMsg{t: proto.MsgClipboard, payload: (&proto.ClipboardData{Text: text}).Encode()}:
-				default:
-				}
-			})
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				w.Run(ctx, func(text string) {
+					q.tryEvent(proto.MsgClipboard, (&proto.ClipboardData{Text: text}).Encode())
+				})
+			}()
 		}
+	}
+
+	// CI mode: after the delay, snapshot the composited canvas — what the
+	// live session decoded (keyframe plus every delta update) — then stop.
+	if opts.SnapshotAfter > 0 && opts.Snapshot != "" {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			t := time.NewTimer(opts.SnapshotAfter)
+			defer t.Stop()
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			winMu.Lock()
+			w := win
+			winMu.Unlock()
+			switch {
+			case w == nil:
+				log.Error("snapshot-after: never connected; nothing written", "path", opts.Snapshot)
+			default:
+				if err := w.Canvas().Snapshot(opts.Snapshot); err != nil {
+					log.Error("snapshot-after failed", "err", err)
+				} else {
+					log.Info("snapshot written", "path", opts.Snapshot)
+				}
+			}
+			cancel()
+		}()
 	}
 
 	attempt := 0
 	for {
 		// Connect (with backoff on repeat attempts).
-		conn, hello, err := dial(opts, log, attempt)
+		conn, hello, err := dial(ctx, opts, log, attempt)
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -82,24 +151,32 @@ func Run(ctx context.Context, opts Options, log *slog.Logger) error {
 		}
 
 		if !haveWindow {
-			win, err = viewer.Open(opts.Display, int(hello.Width), int(hello.Height),
-				"remmote — "+hello.Name, log)
+			// The canvas is host resolution even when the stream is
+			// downscaled: the viewer window and its pointer mapping then
+			// match the host screen, not the reduced wire size.
+			hostW, hostH := up.size(int(hello.Width), int(hello.Height))
+			w, err := viewer.Open(opts.Display, hostW, hostH,
+				"remmote — "+hello.Name, log, opts.FastScale)
 			if err != nil {
+				conn.Close()
 				return fmt.Errorf("client: open viewer: %w", err)
 			}
-			defer win.Close()
+			winMu.Lock()
+			win = w
+			winMu.Unlock()
 			haveWindow = true
-			go func() { winClosed <- win.Pump(&sender{out: outbound}) }()
+			workers.Add(1)
+			go func() { defer workers.Done(); winClosed <- w.Pump(&sender{q: q, div: up.factor}); cancel() }()
 		}
 
 		if opts.Quality >= 1 && opts.Quality <= 100 {
-			outbound <- outMsg{t: proto.MsgSetQuality, payload: (&proto.SetQuality{Quality: uint8(opts.Quality)}).Encode()}
+			q.event(proto.MsgSetQuality, (&proto.SetQuality{Quality: uint8(opts.Quality)}).Encode())
 		}
 
 		log.Info("connected", "server", opts.ServerAddr, "screen",
 			fmt.Sprintf("%dx%d", hello.Width, hello.Height), "name", hello.Name)
 
-		netErr := session(ctx, conn, win, clip, outbound, log)
+		netErr := session(ctx, conn, win, clip, q, up, log)
 
 		select {
 		case <-ctx.Done():
@@ -117,28 +194,30 @@ func Run(ctx context.Context, opts Options, log *slog.Logger) error {
 
 // session runs one connection to completion: network reader + writer.
 // Returns the error that ended the session (nil on clean Close).
-func session(ctx context.Context, conn net.Conn, win *viewer.Window, clip *clipboard.Watcher, outbound chan outMsg, log *slog.Logger) error {
+func session(ctx context.Context, conn net.Conn, win *viewer.Window, clip *clipboard.Watcher, q *outQueue, up *upscaler, log *slog.Logger) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	defer conn.Close()
+	// Cancellation (snapshot timer, Ctrl-C) must not wait for a read
+	// timeout: closing the conn unblocks the reader immediately.
+	sessDone := make(chan struct{})
+	defer close(sessDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-sessDone:
+		}
+	}()
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
-		bw := bufio.NewWriter(conn)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case m := <-outbound:
-				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				if err := proto.WriteMsg(bw, m.t, 0, m.payload); err != nil {
-					return
-				}
-				if err := bw.Flush(); err != nil {
-					return
-				}
-			}
-		}
+		writeLoop(ctx, conn, q)
 	}()
 
+	defer func() { cancel(); conn.Close(); <-writerDone }()
+	dec := newDecoder()
+	defer dec.close()
 	br := bufio.NewReader(conn)
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -148,18 +227,23 @@ func session(ctx context.Context, conn net.Conn, win *viewer.Window, clip *clipb
 		}
 		switch t {
 		case proto.MsgRectUpdate:
-			m, err := proto.DecodeRectUpdate(payload)
+			m, err := proto.DecodeRectUpdateView(payload)
 			if err != nil {
 				return fmt.Errorf("bad RectUpdate: %w", err)
 			}
-			img, err := decode(m.Codec, m.Data)
+			img, err := dec.decode(m.Codec, m.Data, int(m.W), int(m.H))
 			if err != nil {
 				log.Warn("decode rect", "codec", m.Codec, "err", err)
 				continue
 			}
-			r := image.Rect(int(m.X), int(m.Y), int(m.X)+int(m.W), int(m.Y)+int(m.H))
+			// Magnify before compositing so the canvas, and with it the
+			// viewer's letterbox fit and pointer mapping, stay in host
+			// coordinates whatever the server's -downscale is.
+			r, img := up.apply(image.Rect(int(m.X), int(m.Y), int(m.X)+int(m.W), int(m.Y)+int(m.H)),
+				img, int(m.W), int(m.H))
 			if flags&proto.FlagKeyframe != 0 {
-				win.UpdateServerSize(int(m.W), int(m.H)) // keyframe = full screen
+				w, h := up.size(int(m.W), int(m.H))
+				win.UpdateServerSize(w, h) // keyframe = full screen
 			}
 			win.Canvas().Composite(r, img)
 			win.Dirty()
@@ -169,17 +253,15 @@ func session(ctx context.Context, conn net.Conn, win *viewer.Window, clip *clipb
 			if err != nil {
 				return err
 			}
-			win.UpdateServerSize(int(m.Width), int(m.Height))
+			w, h := up.size(int(m.Width), int(m.Height))
+			win.UpdateServerSize(w, h)
 
 		case proto.MsgPing:
 			m, err := proto.DecodePingPong(payload)
 			if err != nil {
 				return err
 			}
-			select {
-			case outbound <- outMsg{t: proto.MsgPong, payload: m.Encode()}:
-			default:
-			}
+			q.tryEvent(proto.MsgPong, m.Encode())
 
 		case proto.MsgClipboard:
 			if m, err := proto.DecodeClipboard(payload); err == nil && clip != nil {
@@ -197,46 +279,188 @@ func session(ctx context.Context, conn net.Conn, win *viewer.Window, clip *clipb
 	}
 }
 
-// sender adapts the viewer's EventListener onto the outbound channel.
-type sender struct {
-	out chan outMsg
+// outQueue carries local input from the viewer pump to the writer
+// goroutine.
+//
+// Two lanes, because they have opposite failure modes: pointer motion
+// is a *stream* where only the newest position matters, while buttons and
+// keys are discrete events that must never be lost. Motion gets a
+// one-slot latest-wins mailbox, so a 1 kHz mouse cannot grow a backlog;
+// discrete events get a queue that is never dropped from, so a click can
+// never be discarded just because the mouse is busy.
+type outQueue struct {
+	events chan outMsg // buttons, keys — queued, never dropped
+	move   chan outMsg // cap 1, holds only the newest position
+	log    *slog.Logger
+	ctx    context.Context
+}
+
+// inputLagWarn is the threshold at which queued input is reported as
+// lagging. Input that waits longer than this is a bug the user feels, so
+// it is worth a line in the log on the machine where it happens.
+const inputLagWarn = 250 * time.Millisecond
+
+func newOutQueue(events int, log *slog.Logger) *outQueue {
+	return &outQueue{
+		events: make(chan outMsg, events),
+		move:   make(chan outMsg, 1),
+		log:    log,
+		ctx:    context.Background(),
+	}
+}
+
+// noteLag reports how long an input event waited between being queued
+// here and being handed to the socket.
+func (q *outQueue) noteLag(m outMsg) {
+	if m.at.IsZero() || q.log == nil {
+		return
+	}
+	if d := time.Since(m.at); d > inputLagWarn {
+		q.log.Warn("input lagged in client before reaching the wire",
+			"type", m.t.String(), "waited_ms", d.Milliseconds())
+	}
+}
+
+// mouseMove replaces any position still waiting: the host only needs the
+// latest one, and keeping stale ones would delay a later click.
+func (q *outQueue) mouseMove(x, y int) {
+	m := outMsg{t: proto.MsgMouseMove, at: time.Now(),
+		payload: (&proto.MouseMove{X: uint16(x), Y: uint16(y)}).Encode()}
+	select {
+	case q.move <- m:
+		return
+	default:
+	}
+	select { // drop the stale position, then install the new one
+	case <-q.move:
+	default:
+	}
+	select {
+	case q.move <- m:
+	default:
+	}
+}
+
+// event queues a discrete input event. It waits for room rather than
+// dropping: a lost click is a bug the user feels as lag.
+func (q *outQueue) event(t proto.MsgType, payload []byte) {
+	select {
+	case q.events <- outMsg{t: t, at: time.Now(), payload: payload}:
+	case <-q.ctx.Done():
+	}
+}
+
+// tryEvent queues a discrete event only if there is room. For traffic
+// that is regenerated on the next tick anyway (pong, clipboard).
+func (q *outQueue) tryEvent(t proto.MsgType, payload []byte) {
+	select {
+	case q.events <- outMsg{t: t, at: time.Now(), payload: payload}:
+	default:
+	}
+}
+
+// takeMove removes the pending position, if any.
+func (q *outQueue) takeMove() (outMsg, bool) {
+	select {
+	case m := <-q.move:
+		return m, true
+	default:
+		return outMsg{}, false
+	}
+}
+
+// peekMove reports whether a position is pending, without consuming it.
+func (q *outQueue) peekMove() (outMsg, bool) {
+	m, ok := q.takeMove()
+	if ok {
+		q.move <- m
+	}
+	return m, ok
+}
+
+func (q *outQueue) eventsLen() int { return len(q.events) }
+
+// writeLoop sends queued input to the server. A pending pointer position
+// is always written *before* the button or key it precedes, because XTEST
+// applies an event at the current pointer position.
+func writeLoop(ctx context.Context, conn net.Conn, q *outQueue) {
+	bw := bufio.NewWriter(conn)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case m := <-q.events:
+			q.noteLag(m)
+			if mv, ok := q.takeMove(); ok {
+				if !writeOne(conn, bw, mv) {
+					return
+				}
+			}
+			if !writeOne(conn, bw, m) {
+				return
+			}
+		case mv := <-q.move:
+			if !writeOne(conn, bw, mv) {
+				return
+			}
+		}
+	}
+}
+
+// writeOne frames and flushes one outbound message; false = connection
+// dead, the writer goroutine must exit.
+func writeOne(conn net.Conn, bw *bufio.Writer, m outMsg) bool {
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if err := proto.WriteMsg(bw, m.t, 0, m.payload); err != nil {
+		return false
+	}
+	return bw.Flush() == nil
 }
 
 type outMsg struct {
 	t       proto.MsgType
 	payload []byte
+	at      time.Time // when the event entered the queue
 }
 
-func (s *sender) MouseMove(x, y int) {
-	s.send(proto.MsgMouseMove, (&proto.MouseMove{X: uint16(x), Y: uint16(y)}).Encode())
+// sender adapts the viewer's EventListener onto the outbound queue.
+//
+// The viewer reports host-screen coordinates, but the wire carries
+// stream coordinates: the server multiplies what it receives by its own
+// -downscale before injecting (internal/server/session.go). So a client
+// that magnified the stream back to host resolution divides on the way
+// out, and the round trip lands on the same host pixel either way.
+type sender struct {
+	q   *outQueue
+	div int
 }
+
+func (s *sender) MouseMove(x, y int) { s.q.mouseMove(x/max(s.div, 1), y/max(s.div, 1)) }
 
 func (s *sender) Button(b uint8, down bool) {
-	s.send(proto.MsgMouseButton, (&proto.MouseButton{Button: b, Down: down}).Encode())
+	s.q.event(proto.MsgMouseButton, (&proto.MouseButton{Button: b, Down: down}).Encode())
 }
 
 func (s *sender) Key(ks uint32, down bool) {
-	s.send(proto.MsgKey, (&proto.Key{Down: down, Keysym: ks}).Encode())
-}
-
-func (s *sender) send(t proto.MsgType, payload []byte) {
-	select {
-	case s.out <- outMsg{t: t, payload: payload}:
-	default: // input flood: drop rather than block the UI thread
-	}
+	s.q.event(proto.MsgKey, (&proto.Key{Down: down, Keysym: ks}).Encode())
 }
 
 // runOnce connects, waits for the first keyframe, snapshots it, exits.
 func runOnce(ctx context.Context, opts Options, log *slog.Logger) error {
-	conn, hello, err := dial(opts, log, 0)
+	conn, hello, err := dial(ctx, opts, log, 0)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+	stopCancel := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopCancel()
 	log.Info("connected", "server", opts.ServerAddr, "name", hello.Name,
 		"screen", fmt.Sprintf("%dx%d", hello.Width, hello.Height))
 
 	br := bufio.NewReader(conn)
+	dec := newDecoder()
+	defer dec.close()
+	up := newUpscaler(opts.Upscale)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		_ = conn.SetReadDeadline(deadline)
@@ -247,32 +471,38 @@ func runOnce(ctx context.Context, opts Options, log *slog.Logger) error {
 		if t != proto.MsgRectUpdate || flags&proto.FlagKeyframe == 0 {
 			continue
 		}
-		m, err := proto.DecodeRectUpdate(payload)
+		m, err := proto.DecodeRectUpdateView(payload)
 		if err != nil {
 			return err
 		}
-		img, err := decode(m.Codec, m.Data)
+		img, err := dec.decode(m.Codec, m.Data, int(m.W), int(m.H))
 		if err != nil {
 			return fmt.Errorf("decode keyframe: %w", err)
 		}
+		// Same magnification the interactive path applies, so a -once
+		// snapshot is directly comparable with a -snapshot-after one.
+		_, img = up.apply(image.Rect(0, 0, int(m.W), int(m.H)), img, int(m.W), int(m.H))
 		if opts.Snapshot != "" {
 			if err := savePNG(img, opts.Snapshot); err != nil {
 				return err
 			}
 		}
-		log.Info("keyframe received", "width", m.W, "height", m.H, "codec", proto.CodecName(m.Codec))
+		w, h := up.size(int(m.W), int(m.H))
+		log.Info("keyframe received", "width", w, "height", h, "codec", proto.CodecName(m.Codec))
 		return nil
 	}
 	return fmt.Errorf("no keyframe within 10 s")
 }
 
 // dial connects and performs the version handshake.
-func dial(opts Options, log *slog.Logger, attempt int) (net.Conn, *proto.ServerHello, error) {
+func dial(ctx context.Context, opts Options, log *slog.Logger, attempt int) (net.Conn, *proto.ServerHello, error) {
 	d := net.Dialer{Timeout: 5 * time.Second}
-	conn, err := d.DialContext(context.Background(), "tcp", opts.ServerAddr)
+	conn, err := d.DialContext(ctx, "tcp", opts.ServerAddr)
 	if err != nil {
 		return nil, nil, err
 	}
+	stopCancel := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopCancel()
 	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
 	}
@@ -283,8 +513,9 @@ func dial(opts Options, log *slog.Logger, attempt int) (net.Conn, *proto.ServerH
 		conn.Close()
 		return nil, nil, err
 	}
-	br := bufio.NewReader(conn)
-	t, _, payload, err := proto.ReadMsg(br)
+	// Read exactly the hello; a temporary buffered reader could swallow
+	// the beginning of the first frame when both arrive together.
+	t, _, payload, err := proto.ReadMsg(conn)
 	if err != nil {
 		conn.Close()
 		return nil, nil, err
@@ -292,6 +523,7 @@ func dial(opts Options, log *slog.Logger, attempt int) (net.Conn, *proto.ServerH
 	if t != proto.MsgServerHello {
 		if t == proto.MsgClose {
 			if c, err := proto.DecodeClose(payload); err == nil {
+				conn.Close()
 				return nil, nil, fmt.Errorf("server refused: %s", c.Reason)
 			}
 		}
@@ -307,13 +539,61 @@ func dial(opts Options, log *slog.Logger, attempt int) (net.Conn, *proto.ServerH
 	return conn, srvHello, nil
 }
 
-// decode decompresses a rect payload by codec byte (both pure Go).
-func decode(codec uint8, data []byte) (image.Image, error) {
+// maxZRAWBytes bounds one decompressed ZRAW rect (8192×8192 px). The
+// server never sends more than a full screen, so this only ever rejects
+// a corrupt or hostile stream: w and h arrive from the wire as uint16,
+// and a legal 32 MiB payload of highly compressible data expands by
+// three orders of magnitude — so the size check must happen *before*
+// DecodeAll, not after it.
+const maxZRAWBytes = 64 << 20
+
+// decoder decodes rect payloads, reusing the ZRAW decompression buffer
+// across rects (safe: each decoded image is composited before the next
+// decode runs).
+type decoder struct {
+	zr  *zstd.Decoder
+	pix []byte
+}
+
+func newDecoder() *decoder {
+	zr, err := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(maxZRAWBytes))
+	if err != nil {
+		// Only fails on bad options, which are compile-time constants.
+		panic(err)
+	}
+	return &decoder{zr: zr}
+}
+
+func (d *decoder) close() { d.zr.Close() }
+
+// decode decompresses a rect payload by codec byte (all pure Go). w, h
+// are the rect dimensions from the wire; only ZRAW needs them (JPEG/WebP
+// carry their own).
+func (d *decoder) decode(codec uint8, data []byte, w, h int) (image.Image, error) {
 	switch codec {
 	case proto.CodecJPEG:
 		return jpeg.Decode(bytes.NewReader(data))
 	case proto.CodecWebP:
 		return webp.Decode(bytes.NewReader(data))
+	case proto.CodecZRAW:
+		if w <= 0 || h <= 0 {
+			return nil, fmt.Errorf("zraw: empty %dx%d rect", w, h)
+		}
+		// 64-bit math: w*h*4 overflows int on 32-bit hosts.
+		want := int64(w) * int64(h) * 4
+		if want > maxZRAWBytes {
+			return nil, fmt.Errorf("zraw: %dx%d rect needs %d bytes, cap is %d",
+				w, h, want, maxZRAWBytes)
+		}
+		pix, err := d.zr.DecodeAll(data, d.pix[:0])
+		if err != nil {
+			return nil, fmt.Errorf("zraw: %w", err)
+		}
+		if int64(len(pix)) != want {
+			return nil, fmt.Errorf("zraw: %d bytes for %dx%d rect", len(pix), w, h)
+		}
+		d.pix = pix
+		return &image.RGBA{Pix: pix, Stride: 4 * w, Rect: image.Rect(0, 0, w, h)}, nil
 	default:
 		return nil, fmt.Errorf("unknown codec %d", codec)
 	}

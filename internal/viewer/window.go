@@ -47,7 +47,7 @@ const viewerEventMask = xproto.EventMaskExposure | xproto.EventMaskStructureNoti
 
 // Open creates and maps the viewer window, sized for a host screen of
 // serverW×serverH but capped at 80% of the local screen.
-func Open(display string, serverW, serverH int, title string, log *slog.Logger) (*Window, error) {
+func Open(display string, serverW, serverH int, title string, log *slog.Logger, fastScale ...bool) (*Window, error) {
 	xc, err := xconn.Dial(display)
 	if err != nil {
 		return nil, err
@@ -107,6 +107,9 @@ func Open(display string, serverW, serverH int, title string, log *slog.Logger) 
 
 	w.canvas = NewCanvas(w.serverW, w.serverH)
 	w.blit = newBlitter(xc, w.win, w.gc, w.canvas, log)
+	if len(fastScale) > 0 {
+		w.blit.fastScale = fastScale[0]
+	}
 	w.blit.Resize(w.winW, w.winH)
 	if err := xproto.MapWindowChecked(xc.X, w.win).Check(); err != nil {
 		xc.Close()
@@ -144,13 +147,20 @@ func (w *Window) Canvas() *Canvas { return w.canvas }
 // Dirty requests a redraw (after canvas compositing).
 func (w *Window) Dirty() { w.blit.Dirty() }
 
-// UpdateServerSize adapts to a host screen resize.
+// UpdateServerSize adapts to a host screen resize. The canvas resize
+// changes the fit rect, so letterbox bars and the whole window must be
+// repainted — not just the new canvas's dirty region.
 func (w *Window) UpdateServerSize(sw, sh int) {
 	w.sizeMu.Lock()
-	w.serverW, w.serverH = max(1, sw), max(1, sh)
+	sw, sh = max(1, sw), max(1, sh)
+	if sw == w.serverW && sh == w.serverH {
+		w.sizeMu.Unlock()
+		return
+	}
+	w.serverW, w.serverH = sw, sh
 	w.sizeMu.Unlock()
-	w.canvas.Resize(w.serverW, w.serverH)
-	w.blit.Dirty()
+	w.canvas.Resize(sw, sh)
+	w.blit.FullRedraw()
 }
 
 // Close tears the window and the local X connection down.
@@ -174,11 +184,13 @@ func (w *Window) Pump(l EventListener) error {
 		}
 		switch e := ev.(type) {
 		case xproto.ExposeEvent:
-			w.blit.Dirty()
+			// The X server repainted over us: the whole window needs
+			// pushing again, not just the canvas's dirty region.
+			w.blit.FullRedraw()
 
 		case xproto.ConfigureNotifyEvent:
 			w.winW, w.winH = int(e.Width), int(e.Height)
-			w.blit.Resize(w.winW, w.winH)
+			w.blit.RequestResize(w.winW, w.winH)
 
 		case xproto.MotionNotifyEvent:
 			if l != nil {
@@ -189,6 +201,9 @@ func (w *Window) Pump(l EventListener) error {
 
 		case xproto.ButtonPressEvent:
 			if l != nil {
+				if sx, sy, ok := w.mapPointer(int(e.EventX), int(e.EventY)); ok {
+					l.MouseMove(sx, sy)
+				}
 				l.Button(uint8(e.Detail), true)
 			}
 
@@ -212,7 +227,7 @@ func (w *Window) Pump(l EventListener) error {
 			}
 
 		case shm.CompletionEvent:
-			w.blit.CompleteNext()
+			w.blit.Complete(e.Shmseg)
 
 		case xproto.ClientMessageEvent:
 			if e.Type == w.deleteAtom {

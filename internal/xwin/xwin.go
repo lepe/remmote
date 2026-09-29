@@ -162,6 +162,81 @@ func (c *Client) IsViewable(w xproto.Window) bool {
 	return a.MapState == xproto.MapStateViewable
 }
 
+// HasWM reports whether a window manager is running. EWMH defines
+// _NET_SUPPORTING_WM_CHECK on the root as its presence marker, and it is
+// the difference between requests a WM honours and requests nobody reads.
+func (c *Client) HasWM() bool {
+	a := c.Atom("_NET_SUPPORTING_WM_CHECK")
+	if a == 0 {
+		return false
+	}
+	r, err := xproto.GetProperty(c.x, false, c.root, a, 0, 0, 1).Reply()
+	if err != nil {
+		return false
+	}
+	return len(r.Value) >= 4
+}
+
+// Maximize makes w fill the screen. With a window manager this is an EWMH
+// request, which is what keeps the window in a real maximized state and
+// accounts for its decorations and panels; without one (bare Xvfb, and
+// therefore the integration tests) nobody reads that request, so the
+// window is resized to the screen outright instead. Both are one-shot:
+// the geometry follows asynchronously via ConfigureNotify.
+// Maximize makes w fill the screen, and reports how the request was made
+// ("ewmh" or "resize") so a caller can log which path its display took.
+// With a window manager this is an EWMH request, which is what keeps the
+// window in a real maximized state and accounts for its decorations and
+// panels; without one (bare Xvfb, and therefore the integration tests)
+// nobody reads that request, so the window is resized to the screen
+// outright instead. Both are one-shot requests: the geometry follows
+// asynchronously via ConfigureNotify.
+func (c *Client) Maximize(w xproto.Window) (string, error) {
+	if !c.HasWM() {
+		g, err := xproto.GetGeometry(c.x, xproto.Drawable(c.root)).Reply()
+		if err != nil {
+			return "resize", fmt.Errorf("xwin: root geometry: %w", err)
+		}
+		return "resize", xproto.ConfigureWindowChecked(c.x, w,
+			xproto.ConfigWindowX|xproto.ConfigWindowY|
+				xproto.ConfigWindowWidth|xproto.ConfigWindowHeight,
+			[]uint32{0, 0, uint32(g.Width), uint32(g.Height)}).Check()
+	}
+	state := c.Atom("_NET_WM_STATE")
+	vert := c.Atom("_NET_WM_STATE_MAXIMIZED_VERT")
+	horz := c.Atom("_NET_WM_STATE_MAXIMIZED_HORZ")
+	if state == 0 || vert == 0 || horz == 0 {
+		return "ewmh", fmt.Errorf("xwin: EWMH _NET_WM_STATE unavailable")
+	}
+	// Addressed to the root's substructure, where a WM is listening.
+	return "ewmh", xproto.SendEventChecked(c.x, false, c.root,
+		xproto.EventMaskSubstructureRedirect|xproto.EventMaskSubstructureNotify,
+		string(maximizeClientMessage(w, state, vert, horz))).Check()
+}
+
+// maximizeClientMessage builds the 32-byte ClientMessage that asks a
+// window manager to add _NET_WM_STATE_MAXIMIZED_{VERT,HORZ} to w.
+//
+// Layout: code(1) format(1) seq(2) window(4) type(4) data(20), where the
+// data is [action, arg1, arg2, source, pad]. The event is built by hand
+// because xgb's ClientMessageData union only serialises its raw Data8
+// bytes — its Bytes() panics on anything else — so the five 32-bit fields
+// have to be packed explicitly. Little-endian, for the same reason as
+// sendSelectionNotify in internal/clipboard: xgb negotiates an LSB-first
+// connection, as do x86 Xlib clients.
+func maximizeClientMessage(w xproto.Window, state, vert, horz xproto.Atom) []byte {
+	b := make([]byte, 32)
+	b[0] = 33 // ClientMessage
+	b[1] = 32 // format: 32-bit
+	binary.LittleEndian.PutUint32(b[4:8], uint32(w))
+	binary.LittleEndian.PutUint32(b[8:12], uint32(state))
+	binary.LittleEndian.PutUint32(b[12:16], 1) // _NET_WM_STATE_ADD
+	binary.LittleEndian.PutUint32(b[16:20], uint32(vert))
+	binary.LittleEndian.PutUint32(b[20:24], uint32(horz))
+	binary.LittleEndian.PutUint32(b[24:28], 1) // source indication: application
+	return b
+}
+
 // SelectStructureNotify ORs StructureNotify into the window's existing
 // event mask (clobbering the mask would break the app's own selections).
 func (c *Client) SelectStructureNotify(w xproto.Window) error {

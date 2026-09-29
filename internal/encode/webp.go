@@ -21,19 +21,19 @@ func newWebP() (Encoder, error) { return WebP{}, nil }
 
 func (WebP) Codec() uint8 { return proto.CodecWebP }
 
-func (WebP) Encode(img image.Image, quality int) ([]byte, error) {
+func (WebP) Encode(img image.Image, quality int) (uint8, []byte, error) {
 	q := clampQuality(quality)
 	for {
 		opts, err := encoder.NewLossyEncoderOptions(encoder.PresetDefault, float32(q))
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		var buf bytes.Buffer
 		if err := webp.Encode(&buf, img, opts); err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		if buf.Len() <= proto.MaxPayload || q <= 5 {
-			return buf.Bytes(), nil
+			return proto.CodecWebP, buf.Bytes(), nil
 		}
 		q /= 2
 	}

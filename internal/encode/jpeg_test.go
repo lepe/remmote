@@ -27,9 +27,12 @@ func TestJpegEncode(t *testing.T) {
 		t.Fatalf("codec = %d", enc.Codec())
 	}
 	for _, q := range []int{1, 50, 75, 100, 0, 150} {
-		data, err := enc.Encode(gradient(320, 200), q)
+		codec, data, err := enc.Encode(gradient(320, 200), q)
 		if err != nil {
 			t.Fatalf("quality %d: %v", q, err)
+		}
+		if codec != proto.CodecJPEG {
+			t.Fatalf("quality %d: wire codec = %d", q, codec)
 		}
 		if len(data) == 0 || len(data) > proto.MaxPayload {
 			t.Fatalf("quality %d: %d bytes", q, len(data))

@@ -35,22 +35,50 @@ func main() {
 		expect        = flag.String("expect", "#20c040", "expected color for -check")
 		minPct        = flag.Int("min-match", 90, "minimum percentage of matching pixels")
 		expectRegions = flag.String("expect-region", "", "with -check: comma list WxH+X+Y:#rrggbb")
+		expectSize    = flag.String("expect-size", "", "with -check: required PNG size, WxH")
 		clipSet       = flag.String("clip-set", "", "act as a user copying this text (hold the selection)")
 		clipWatch     = flag.Bool("clip-watch", false, "print clipboard changes as CLIP:<text> lines")
 		size          = flag.String("size", "", "windowed mode: size WxH (default fullscreen OR)")
 		pos           = flag.String("pos", "0+0", "windowed mode: position X+Y")
 		wmClass       = flag.String("wm-class", "remmote-testfill:RemmoteTestfill", "windowed mode: WM_CLASS INST:CLASS (\"\" = none)")
 		windows       = flag.String("windows", "", "paint several windows: comma list #rrggbb@WxH+X+Y")
+		warp          = flag.String("warp", "", "warp this display's pointer to X,Y (generates motion events)")
+		pointer       = flag.Bool("pointer", false, "print this display's pointer position as PTR:x,y")
 	)
 	flag.Parse()
 
 	switch {
+	case *warp != "":
+		x, y, err := parseXY(*warp)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "FAIL: -warp wants X,Y:", err)
+			os.Exit(1)
+		}
+		if err := warpPointer(*display, x, y); err != nil {
+			fmt.Fprintln(os.Stderr, "FAIL:", err)
+			os.Exit(1)
+		}
+
+	case *pointer:
+		x, y, err := readPointer(*display)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "FAIL:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("PTR:%d,%d\n", x, y)
 	case *check != "":
 		if err := checkPNG(*check, *expect, *minPct); err != nil {
 			fmt.Fprintln(os.Stderr, "FAIL:", err)
 			os.Exit(1)
 		}
 		fmt.Printf("OK: %s matches %s (≥%d%%)\n", *check, *expect, *minPct)
+		if *expectSize != "" {
+			if err := checkSize(*check, *expectSize); err != nil {
+				fmt.Fprintln(os.Stderr, "FAIL:", err)
+				os.Exit(1)
+			}
+			fmt.Println("OK: size matches", *expectSize)
+		}
 		if *expectRegions != "" {
 			if err := checkRegions(*check, *expectRegions); err != nil {
 				fmt.Fprintln(os.Stderr, "FAIL:", err)
@@ -281,6 +309,25 @@ func parsePos(s string) (x, y int, err error) {
 	return x, y, nil
 }
 
+// checkSize verifies a snapshot's dimensions ("WxH"). The canvas is
+// sized by the client's canvas, so this is what proves a -upscale
+// actually took effect rather than silently passing at stream size.
+func checkSize(path, spec string) error {
+	img, _, err := openPNG(path)
+	if err != nil {
+		return err
+	}
+	w, h, err := parseSize(spec)
+	if err != nil {
+		return fmt.Errorf("-expect-size %q: %w", spec, err)
+	}
+	b := img.Bounds()
+	if b.Dx() != w || b.Dy() != h {
+		return fmt.Errorf("snapshot is %dx%d, want %dx%d", b.Dx(), b.Dy(), w, h)
+	}
+	return nil
+}
+
 // checkRegions verifies colored regions of a snapshot:
 // "WxH+X+Y:#rrggbb,..." with the same tolerance as checkPNG.
 func checkRegions(path, spec string) error {
@@ -376,4 +423,38 @@ func abs8(a, b uint8) int {
 		return int(a - b)
 	}
 	return int(b - a)
+}
+
+// parseXY parses the "X,Y" argument shared by -warp.
+func parseXY(s string) (int, int, error) {
+	var x, y int
+	if _, err := fmt.Sscanf(s, "%d,%d", &x, &y); err != nil {
+		return 0, 0, err
+	}
+	return x, y, nil
+}
+
+// warpPointer moves the pointer without a button press, which is what a
+// local user's mouse motion looks like to the viewer's event pump.
+func warpPointer(display string, x, y int) error {
+	xc, err := xconn.Dial(display)
+	if err != nil {
+		return err
+	}
+	defer xc.Close()
+	return xproto.WarpPointerChecked(xc.X, 0, xc.Root(), 0, 0, 0, 0, int16(x), int16(y)).Check()
+}
+
+// readPointer reports the pointer position in root coordinates.
+func readPointer(display string) (int, int, error) {
+	xc, err := xconn.Dial(display)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer xc.Close()
+	q, err := xproto.QueryPointer(xc.X, xc.Root()).Reply()
+	if err != nil {
+		return 0, 0, err
+	}
+	return int(q.RootX), int(q.RootY), nil
 }

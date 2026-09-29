@@ -22,6 +22,41 @@ func TestQuantizeOutward(t *testing.T) {
 	}
 }
 
+// setMapped is the single place the mapped flag changes. It must report a
+// change exactly once per transition: a repeated reading of the same state
+// must not keep re-dirtying the window (rescan re-reads every 2 s), while
+// a real transition must schedule a repaint so the canvas bbox and the
+// pixels both follow.
+func TestSetMappedReportsTransitionsOnce(t *testing.T) {
+	var w trackedWin
+	if !setMapped(&w, true) {
+		t.Fatal("first map must report a change")
+	}
+	if !w.mapped {
+		t.Fatal("mapped flag not set")
+	}
+	if !w.stale || w.dirty.Empty() {
+		t.Fatal("a map must mark the window stale and dirty")
+	}
+	if setMapped(&w, true) {
+		t.Fatal("re-reading the same state must not report a change")
+	}
+
+	w.dirty = image.Rectangle{}
+	if !setMapped(&w, false) {
+		t.Fatal("unmap must report a change")
+	}
+	if w.mapped {
+		t.Fatal("mapped flag not cleared")
+	}
+	if !w.stale || w.dirty.Empty() {
+		t.Fatal("an unmap must mark the window stale and dirty")
+	}
+	if setMapped(&w, false) {
+		t.Fatal("re-reading the same state must not report a change again")
+	}
+}
+
 // The window→canvas mapping math used by TakePending and Capture must
 // be exact inverses of each other.
 func TestWindowCanvasMapping(t *testing.T) {

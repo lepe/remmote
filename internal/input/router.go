@@ -52,11 +52,12 @@ type Router struct {
 func NewRouter(inj *Injector, x *xgb.Conn, mmap WindowMap, log *slog.Logger) *Router {
 	r := &Router{inj: inj, x: x, mmap: mmap, log: log}
 	r.raiseFn = func(w xproto.Window) error {
-		return xproto.ConfigureWindowChecked(x, w, xproto.ConfigWindowStackMode,
-			[]uint32{xproto.StackModeAbove}).Check()
+		xproto.ConfigureWindow(x, w, xproto.ConfigWindowStackMode, []uint32{xproto.StackModeAbove})
+		return nil
 	}
 	r.focusFn = func(w xproto.Window) error {
-		return xproto.SetInputFocusChecked(x, revertToParent, w, xproto.TimeCurrentTime).Check()
+		xproto.SetInputFocus(x, revertToParent, w, xproto.TimeCurrentTime)
+		return nil
 	}
 	return r
 }

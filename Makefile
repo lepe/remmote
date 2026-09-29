@@ -1,11 +1,11 @@
 GO ?= go
 BIN := bin
 
-.PHONY: all build build-webp test integration lint vendor clean
+.PHONY: all build build-webp test integration integration-shutdown lint vendor clean
 
 all: build
 
-## build: pure-Go binaries (no CGo, JPEG codec only)
+## build: pure-Go binaries (no CGo; jpeg/zraw/hybrid codecs, optional -tags webp)
 build:
 	CGO_ENABLED=0 $(GO) build -o $(BIN)/ ./cmd/...
 
@@ -18,6 +18,14 @@ test:
 
 integration: build
 	./scripts/integration.sh
+	./scripts/integration.sh jpeg
+	./scripts/integration-delta.sh
+	./scripts/integration-delta.sh hybrid 2 2
+	./scripts/integration-exec.sh
+	./scripts/integration-maximize.sh
+
+integration-shutdown: build
+	python3 scripts/integration-shutdown.py
 
 lint:
 	$(GO) vet ./...

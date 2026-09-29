@@ -3,7 +3,9 @@ package viewer
 import (
 	"image"
 	"log/slog"
+	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	xdraw "golang.org/x/image/draw"
@@ -15,15 +17,12 @@ import (
 	"github.com/lepe/remmote/internal/xconn"
 )
 
-// completionWatchdog frees a segment the X server never acknowledged.
-const completionWatchdog = 250 * time.Millisecond
-
 // Blitter draws the canvas into the client window, scaled to fit with
 // black letterbox bars. Primary path: MIT-SHM PutImage with two
 // ping-pong segments tracked by Completion events; fallback: banded core
 // PutImage.
 //
-// Concurrency: the event pump calls Resize/CompleteNext; the draw
+// Concurrency: the event pump calls RequestResize/Complete; the draw
 // goroutine calls draw. All mutable state is guarded by mu; draw holds it
 // for the whole frame (a few ms), Resize is rare.
 type Blitter struct {
@@ -33,16 +32,22 @@ type Blitter struct {
 	gc     xproto.Gcontext
 	log    *slog.Logger
 
-	mu         sync.Mutex
-	winW, winH int
-	scaled     *image.RGBA // winW × winH staging buffer
+	mu              sync.Mutex
+	winW, winH      int
+	scaled          *image.RGBA // winW × winH staging buffer (scaled mode)
+	coreBuf         []byte      // reusable core-PutImage buffer
+	fastScale       bool        // nearest-neighbor scaling when detail is less important
+	fullRequested   atomic.Bool
+	completions     chan shm.Seg
+	resizeRequested chan image.Point
+	forceFull       bool // repaint the whole window (resize/expose)
 
 	segs     [2]*segPair
 	inFlight [2]time.Time // when each segment was last submitted
-	pending  []int        // submitted-but-not-completed, FIFO
 
-	dirty chan struct{}
-	done  chan struct{}
+	dirty   chan struct{}
+	done    chan struct{}
+	stopped chan struct{}
 }
 
 type segPair struct {
@@ -52,22 +57,27 @@ type segPair struct {
 
 func newBlitter(xc *xconn.Conn, win xproto.Window, gc xproto.Gcontext, canvas *Canvas, log *slog.Logger) *Blitter {
 	return &Blitter{
-		xc:     xc,
-		canvas: canvas,
-		win:    win,
-		gc:     gc,
-		log:    log,
-		dirty:  make(chan struct{}, 1),
-		done:   make(chan struct{}),
+		xc:              xc,
+		canvas:          canvas,
+		win:             win,
+		gc:              gc,
+		log:             log,
+		dirty:           make(chan struct{}, 1),
+		done:            make(chan struct{}),
+		stopped:         make(chan struct{}),
+		resizeRequested: make(chan image.Point, 1),
+		completions:     make(chan shm.Seg, 16),
 	}
 }
 
 // Start launches the draw goroutine (60 fps coalescing).
 func (b *Blitter) Start() {
 	b.mu.Lock()
-	b.allocSegments()
+	if b.segs[0] == nil && b.hasSHM() {
+		b.allocSegments()
+	}
 	b.mu.Unlock()
-	go b.loop()
+	go func() { defer close(b.stopped); b.loop() }()
 }
 
 func (b *Blitter) hasSHM() bool { return b.xc.Ext.SHM }
@@ -75,6 +85,7 @@ func (b *Blitter) hasSHM() bool { return b.xc.Ext.SHM }
 // Stop terminates the draw goroutine and releases segments.
 func (b *Blitter) Stop() {
 	close(b.done)
+	<-b.stopped
 	b.mu.Lock()
 	b.releaseSegments()
 	b.mu.Unlock()
@@ -86,6 +97,14 @@ func (b *Blitter) Dirty() {
 	case b.dirty <- struct{}{}:
 	default:
 	}
+}
+
+// FullRedraw forces a complete window repaint: expose (the X server
+// painted over us) and letterbox-bar changes. Partial canvas updates use
+// Dirty instead — the canvas already tracks what changed.
+func (b *Blitter) FullRedraw() {
+	b.fullRequested.Store(true)
+	b.Dirty()
 }
 
 // Size returns the current window size (for input mapping).
@@ -104,27 +123,57 @@ func (b *Blitter) Resize(w, h int) {
 	}
 	b.winW, b.winH = w, h
 	b.scaled = image.NewRGBA(image.Rect(0, 0, w, h))
+	b.forceFull = true // new geometry: bars and everything else repaint
 	if b.hasSHM() {
 		b.releaseSegments()
 		b.allocSegments()
 	}
-	b.pending = b.pending[:0]
 	b.Dirty()
 }
 
-// CompleteNext frees the oldest in-flight segment. Completion events do
-// not identify their segment, but X delivers them in request order —
-// and we submit segments in order — so FIFO matching is exact.
-// Caller: event pump.
-func (b *Blitter) CompleteNext() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.pending) == 0 {
-		return
+// Complete queues an acknowledgement without blocking the input event pump.
+// Match the segment id so late completions after resize cannot free new buffers.
+func (b *Blitter) Complete(id shm.Seg) {
+	select {
+	case b.completions <- id:
+	default:
+		// Only two current segments can be in flight; an overflow is old
+		// resize traffic. Keep the most recent acknowledgements.
+		select {
+		case <-b.completions:
+		default:
+		}
+		select {
+		case b.completions <- id:
+		default:
+		}
 	}
-	i := b.pending[0]
-	b.pending = b.pending[1:]
-	b.inFlight[i] = time.Time{}
+}
+
+// RequestResize keeps geometry work on the draw goroutine.
+func (b *Blitter) RequestResize(w, h int) {
+	select {
+	case <-b.resizeRequested:
+	default:
+	}
+	b.resizeRequested <- image.Pt(w, h)
+	b.Dirty()
+}
+
+// consumeCompletions requires b.mu held.
+func (b *Blitter) consumeCompletions() {
+	for {
+		select {
+		case id := <-b.completions:
+			for i, seg := range b.segs {
+				if seg != nil && seg.id == id {
+					b.inFlight[i] = time.Time{}
+				}
+			}
+		default:
+			return
+		}
+	}
 }
 
 // allocSegments and releaseSegments require b.mu held.
@@ -161,117 +210,241 @@ func (b *Blitter) releaseSegments() {
 		}
 		b.inFlight[i] = time.Time{}
 	}
-	b.pending = b.pending[:0]
 }
 
 func (b *Blitter) loop() {
-	ticker := time.NewTicker(time.Second / 60)
-	defer ticker.Stop()
+	// Draw immediately after an idle gap, but cap sustained work (including
+	// retries while SHM segments are busy) at 60 Hz. A rearmed dirty signal
+	// must not spin continuously waiting for a completion event.
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
+	var lastDraw time.Time
 	for {
 		select {
 		case <-b.done:
 			return
 		case <-b.dirty:
-		case <-ticker.C:
-			// Redraw only when something changed since last time.
+		}
+		if wait := time.Second/60 - time.Since(lastDraw); wait > 0 {
+			timer.Reset(wait)
 			select {
-			case <-b.dirty:
-			default:
-				continue
+			case <-b.done:
+				return
+			case <-timer.C:
 			}
 		}
+		select {
+		case size := <-b.resizeRequested:
+			b.Resize(size.X, size.Y)
+		default:
+		}
+		lastDraw = time.Now()
 		b.draw()
 	}
 }
 
-// draw composites the canvas into the staging buffer and pushes it to
-// the window. Runs on the draw goroutine only.
+// draw pushes what changed since the last draw into the window: the
+// canvas's dirty region is scaled (when needed), converted, and
+// PutImage'd — only a full redraw touches the whole window. At 1:1 the
+// canvas converts straight into the SHM segment with no scaler or staging
+// copy at all. Runs on the draw goroutine only.
 func (b *Blitter) draw() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.winW == 0 || b.winH == 0 || b.scaled == nil {
 		return
 	}
+	b.consumeCompletions()
+	full := b.fullRequested.Swap(false) || b.forceFull
+	b.forceFull = false
+	dirty := b.canvas.TakeDirty()
+	if dirty.Empty() && !full {
+		return
+	}
+	// rearm re-arms the intent of this draw when it could not complete
+	// (segments in flight, request error) so no update is lost.
+	rearm := func() {
+		if full {
+			b.forceFull = true
+		} else {
+			b.canvas.markDirty(dirty)
+		}
+		b.Dirty()
+	}
+
+	var failed bool
 	b.canvas.withView(func(src *image.RGBA) {
-		fit := FitRect(b.winW, b.winH, src.Rect.Dx(), src.Rect.Dy())
-		fillBlack(b.scaled)
-		xdraw.ApproxBiLinear.Scale(b.scaled, fit, src, src.Rect, xdraw.Src, nil)
-	})
-
-	if b.hasSHM() && b.segs[0] != nil {
-		i := b.takeSegment()
-		if i < 0 {
-			return // both in flight; next tick will retry
+		cw, ch := src.Rect.Dx(), src.Rect.Dy()
+		if cw == 0 || ch == 0 {
+			return
 		}
-		seg := b.segs[i]
-		if err := capture.RGBAToBGRA(seg.local.Mem(), b.scaled, b.winW, b.winH, b.xc.LSBFirst()); err != nil {
+		fit := FitRect(b.winW, b.winH, cw, ch)
+		oneToOne := cw == b.winW && ch == b.winH // fit == full window
+
+		// dstR is the window region this draw covers.
+		var dstR image.Rectangle
+		if full {
+			dstR = image.Rect(0, 0, b.winW, b.winH)
+		} else {
+			region := dirty
+			if !oneToOne && !b.fastScale {
+				region = region.Inset(-1).Intersect(src.Rect)
+			}
+			dstR = scaleOut(region, cw, ch, fit).Intersect(fit)
+			if dstR.Empty() {
+				return
+			}
+		}
+
+		// convSrc/convRect is the RGBA region to convert into the
+		// segment. Scaled mode draws the region through the scaler
+		// into staging first; 1:1 converts the canvas region in
+		// place — no scaler, no staging copy.
+		convSrc, convRect := src, dstR
+		if !oneToOne {
+			if full {
+				fillBlack(b.scaled)
+			}
+			scaleRegion(b.scaled, src, fit, dstR, b.fastScale)
+			convSrc = b.scaled
+		}
+
+		if b.hasSHM() && b.segs[0] != nil {
+			i := b.takeSegment()
+			if i < 0 {
+				failed = true // both in flight; retry next tick
+				return
+			}
+			seg := b.segs[i]
+			off := (dstR.Min.Y*b.winW + dstR.Min.X) * 4
+			if err := capture.RegionToBGRA(seg.local.Mem()[off:], b.winW*4, convSrc, convRect, b.xc.LSBFirst()); err != nil {
+				b.log.Warn("viewer convert", "err", err)
+				b.dropPending(i)
+				failed = true
+				return
+			}
+			if err := shm.PutImageChecked(b.xc.X, xproto.Drawable(b.win), b.gc,
+				uint16(b.winW), uint16(b.winH),
+				uint16(dstR.Min.X), uint16(dstR.Min.Y),
+				uint16(dstR.Dx()), uint16(dstR.Dy()),
+				int16(dstR.Min.X), int16(dstR.Min.Y),
+				24, xproto.ImageFormatZPixmap, 1, seg.id, 0).Check(); err != nil {
+				b.log.Warn("viewer PutImage", "err", err)
+				b.dropPending(i)
+				failed = true
+			}
+			return
+		}
+
+		// Core fallback: banded PutImage of the region.
+		w, h := dstR.Dx(), dstR.Dy()
+		if cap(b.coreBuf) < w*h*4 {
+			b.coreBuf = make([]byte, w*h*4)
+		}
+		buf := b.coreBuf[:w*h*4]
+		if err := capture.RegionToBGRA(buf, w*4, convSrc, convRect, b.xc.LSBFirst()); err != nil {
 			b.log.Warn("viewer convert", "err", err)
-			b.dropPending(i)
+			failed = true
 			return
 		}
-		if err := shm.PutImageChecked(b.xc.X, xproto.Drawable(b.win), b.gc,
-			uint16(b.winW), uint16(b.winH), 0, 0, uint16(b.winW), uint16(b.winH), 0, 0,
-			24, xproto.ImageFormatZPixmap, 1, seg.id, 0).Check(); err != nil {
-			b.log.Warn("viewer PutImage", "err", err)
-			b.dropPending(i)
+		const maxBandBytes = 4 << 20
+		bandH := maxBandBytes / (w * 4)
+		if bandH < 1 {
+			bandH = 1
 		}
-		return
+		for y0 := 0; y0 < h; y0 += bandH {
+			bh := min(bandH, h-y0)
+			if err := xproto.PutImageChecked(b.xc.X, xproto.ImageFormatZPixmap, xproto.Drawable(b.win), b.gc,
+				uint16(w), uint16(bh), int16(dstR.Min.X), int16(dstR.Min.Y+y0), 0, 24,
+				buf[y0*w*4:(y0+bh)*w*4]).Check(); err != nil {
+				b.log.Warn("viewer core PutImage", "err", err)
+				failed = true
+				return
+			}
+		}
+	})
+	if failed {
+		rearm()
 	}
+}
 
-	// Core fallback: banded PutImage of the whole staging buffer.
-	buf := make([]byte, b.winW*b.winH*4)
-	if err := capture.RGBAToBGRA(buf, b.scaled, b.winW, b.winH, b.xc.LSBFirst()); err != nil {
-		b.log.Warn("viewer convert", "err", err)
+// scaleRegion keeps the full-frame transform and clips destination writes.
+// Rescaling a cropped source independently changes pixel alignment on deltas.
+func scaleRegion(dst, src *image.RGBA, fit, clip image.Rectangle, fast bool) {
+	if fast {
+		nearestRegion(dst, src, fit, clip)
 		return
 	}
-	const maxBandBytes = 4 << 20
-	bandH := maxBandBytes / (b.winW * 4)
-	if bandH < 1 {
-		bandH = 1
+	xdraw.ApproxBiLinear.Scale(dst.SubImage(clip).(*image.RGBA), fit, src, src.Rect, xdraw.Src, nil)
+}
+
+// nearestRegion computes horizontal samples once per region, avoiding the
+// general scaler's integer division for every pixel on every row.
+func nearestRegion(dst, src *image.RGBA, fit, clip image.Rectangle) {
+	clip = clip.Intersect(fit).Intersect(dst.Rect)
+	if clip.Empty() || src.Rect.Empty() {
+		return
 	}
-	for y0 := 0; y0 < b.winH; y0 += bandH {
-		bh := min(bandH, b.winH-y0)
-		if err := xproto.PutImageChecked(b.xc.X, xproto.ImageFormatZPixmap, xproto.Drawable(b.win), b.gc,
-			uint16(b.winW), uint16(bh), 0, int16(y0), 0, 24,
-			buf[y0*b.winW*4:(y0+bh)*b.winW*4]).Check(); err != nil {
-			b.log.Warn("viewer core PutImage", "err", err)
-			return
+	var offsets [2048]int
+	xs := offsets[:min(clip.Dx(), len(offsets))]
+	if clip.Dx() > len(offsets) {
+		xs = make([]int, clip.Dx())
+	}
+	for x := range xs {
+		xs[x] = int((2*uint64(clip.Min.X+x-fit.Min.X)+1)*uint64(src.Rect.Dx())/(2*uint64(fit.Dx()))) * 4
+	}
+	for y := clip.Min.Y; y < clip.Max.Y; y++ {
+		sy := src.Rect.Min.Y + int((2*uint64(y-fit.Min.Y)+1)*uint64(src.Rect.Dy())/(2*uint64(fit.Dy())))
+		row := src.Pix[src.PixOffset(src.Rect.Min.X, sy):]
+		d := dst.Pix[dst.PixOffset(clip.Min.X, y):][:clip.Dx()*4]
+		for x, sx := range xs {
+			copy(d[x*4:x*4+4], row[sx:sx+4])
 		}
 	}
 }
 
-// takeSegment returns a free segment index, or -1. A segment whose
-// Completion event is overdue (broken SHM server) is force-freed.
-// Requires b.mu held; itself appends to pending.
+// scaleOut maps a canvas region to window coordinates, rounded outward,
+// intersected with the fit rect.
+func scaleOut(r image.Rectangle, cw, ch int, fit image.Rectangle) image.Rectangle {
+	sx := float64(fit.Dx()) / float64(cw)
+	sy := float64(fit.Dy()) / float64(ch)
+	return image.Rect(
+		fit.Min.X+int(math.Floor(float64(r.Min.X)*sx)),
+		fit.Min.Y+int(math.Floor(float64(r.Min.Y)*sy)),
+		fit.Min.X+int(math.Ceil(float64(r.Max.X)*sx)),
+		fit.Min.Y+int(math.Ceil(float64(r.Max.Y)*sy)),
+	)
+}
+
+// scaleIn maps a window region back to canvas coordinates, rounded
+// outward, intersected with the canvas: the source the scaler needs to
+// produce scaleOut's result.
+func scaleIn(r image.Rectangle, cw, ch int, fit image.Rectangle) image.Rectangle {
+	ix := float64(cw) / float64(fit.Dx())
+	iy := float64(ch) / float64(fit.Dy())
+	return image.Rect(
+		int(math.Floor(float64(r.Min.X-fit.Min.X)*ix)),
+		int(math.Floor(float64(r.Min.Y-fit.Min.Y)*iy)),
+		int(math.Ceil(float64(r.Max.X-fit.Min.X)*ix)),
+		int(math.Ceil(float64(r.Max.Y-fit.Min.Y)*iy)),
+	)
+}
+
+// takeSegment requires b.mu held. Never reuse shared memory until X has
+// acknowledged it; elapsed time alone does not make an in-flight buffer safe.
 func (b *Blitter) takeSegment() int {
-	for i := 0; i < 2; i++ {
-		if b.segs[i] == nil {
-			continue
-		}
-		free := b.inFlight[i].IsZero()
-		if !free && time.Since(b.inFlight[i]) > completionWatchdog {
-			free = true // watchdog kick
-		}
-		if free {
+	for i := range b.segs {
+		if b.segs[i] != nil && b.inFlight[i].IsZero() {
 			b.inFlight[i] = time.Now()
-			b.pending = append(b.pending, i)
 			return i
 		}
 	}
 	return -1
 }
 
-// dropPending removes i from the completion FIFO (submission failed, so
-// no Completion will arrive for it). Requires b.mu held.
-func (b *Blitter) dropPending(i int) {
-	b.inFlight[i] = time.Time{}
-	for j, v := range b.pending {
-		if v == i {
-			b.pending = append(b.pending[:j], b.pending[j+1:]...)
-			return
-		}
-	}
-}
+// dropPending releases a submission rejected by X (no completion will arrive).
+func (b *Blitter) dropPending(i int) { b.inFlight[i] = time.Time{} }
 
 // FitRect computes the letterbox rect of an imgW×imgH image inside a
 // winW×winH window (at least 1×1).

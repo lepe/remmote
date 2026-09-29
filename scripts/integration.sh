@@ -17,7 +17,7 @@ PORT=17677
 COLOR='#20c040'
 SNAP=$(mktemp /tmp/remmote-it-XXXXXX.png)
 LOG=$(mktemp /tmp/remmote-it-XXXXXX.log)
-CODEC="${1:-jpeg}"
+CODEC="${1:-hybrid}"
 
 XVFB_PID=""
 SRV_PID=""
