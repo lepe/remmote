@@ -23,17 +23,19 @@ views and drives.
   either side).
 
 Everything is pure Go: `jezek/xgb` for the X protocol, `golang.org/x/sys`
-for SysV shared memory, stdlib for TCP/JPEG/logging. The default build has
+for SysV shared memory, `golang.org/x/crypto` for scrypt (the `-tls`
+shared secret), stdlib for TCP/TLS/JPEG/logging. The default build has
 **zero CGo** and cross-compiles anywhere Go does.
 
 > [!WARNING]
-> **No authentication.** Anyone who can reach the server's TCP port gets
-> live view *and full keyboard/mouse control* of the host. Use on a
-> trusted LAN only. Pass `-tls` on both sides to encrypt the stream in
-> transit — that stops eavesdropping, but the server still accepts any
-> client that completes the handshake, so it does not make the host
-> private to you. For anything else, tunnel the connection through SSH or
-> WireGuard:
+> **No authentication** — unless you give both sides a shared secret.
+> Anyone who can reach the server's TCP port gets live view *and full
+> keyboard/mouse control* of the host. Use on a trusted LAN only. `-tls` on
+> both sides encrypts the stream in transit; `-tls <secret>` on both sides
+> also makes the server refuse any client that does not carry that secret.
+> Encryption on its own accepts whoever completes the handshake, so it does
+> not make the host private to you. For anything else, tunnel the connection
+> through SSH or WireGuard:
 >
 > ```sh
 > ssh -L 7677:localhost:7677 user@host   # then: remmote-client -server localhost:7677
@@ -154,7 +156,7 @@ keyframe (2 s).
 | `-exec` | — | run this command and share only its windows (e.g. `-exec xcalc`) |
 | `-window` | — | share this existing window id (hex) and windows it spawns |
 | `-maximize` | off | with `-exec`/`-window`: maximize the shared window onto the host screen once it appears |
-| `-tls` | off | encrypt the stream with TLS 1.3 (prints a fingerprint for clients to pin) |
+| `-tls` | off | encrypt the stream: no value to generate and print a certificate fingerprint, a shared secret both sides pass (it also makes the server admit only clients that have it), or `SHA256:…` to assert the `-tls-cert` certificate |
 | `-tls-cert` | — | with `-tls`: PEM certificate to use (default: generate and cache one) |
 | `-tls-key` | — | with `-tls`: PEM private key to use (default: generate and cache one) |
 | `-no-clipboard` | off | disable clipboard synchronization |
@@ -169,8 +171,7 @@ keyframe (2 s).
 | `-quality` | `0` | JPEG/WebP quality 1-100; 0 = keep default. ZRAW remains lossless |
 | `-fast-scale` | off | use nearest-neighbor viewer scaling for lower CPU use, with rougher edges |
 | `-upscale` | `1` | magnify the stream by 1, 2 or 4 back to host resolution; match the server's `-downscale` so the canvas, window and pointer mapping use host coordinates |
-| `-tls` | off | encrypt the stream (the server must be started with `-tls`) |
-| `-tls-fingerprint` | — | additionally verify the server certificate against this SHA-256 fingerprint (printed by the server at startup) |
+| `-tls` | off | encrypt the stream (the server must be started with `-tls`): no value to accept its certificate as it arrives, `SHA256:…` to pin it, or the shared secret the server was started with (the server requires a secret when it was started with one) |
 | `-once` | off | exit after the first keyframe (no window; CI mode) |
 | `-snapshot` | — | with `-once`: write the first full frame as a PNG |
 | `-snapshot-after` | — | with `-snapshot`: run the live session for D, write the composited canvas (keyframe + deltas), exit (CI) |
@@ -232,31 +233,73 @@ See [PERFORMANCE.md](PERFORMANCE.md) for measured tradeoffs and benchmark comman
 
 ### Encryption (TLS)
 
-Add `-tls` to both sides — that is the whole setup:
+`-tls` takes an optional value, and both sides read it the same way:
 
 ```sh
+# simplest — encrypted, but the client does not check who it is talking to
 ./bin/remmote-server -tls
 ./bin/remmote-client -server HOST:7677 -tls
+
+# verified — the same secret on both sides, nothing to copy out of a log
+./bin/remmote-server -tls "$(openssl rand -hex 16)"
+./bin/remmote-client -server HOST:7677 -tls "$(openssl rand -hex 16)"  # same value
+
+# or pin the fingerprint the server prints when it starts
+./bin/remmote-server -tls                     # logs … fingerprint=SHA256:48bc…
+./bin/remmote-client -server HOST:7677 -tls SHA256:48bc…
 ```
 
-The server generates a certificate the first time it starts and caches it
-under `~/.config/remmote/`, so the fingerprint stays the same across
-restarts. Point `-tls-cert`/`-tls-key` at your own pair to use a real one
-instead.
+**No value** — the server generates a certificate and caches it under
+`~/.config/remmote/`, so the fingerprint survives restarts, and the client
+encrypts while accepting the certificate as it arrives. That is not a
+check, so the client says so:
+
+```
+TLS: encrypting without verifying the server certificate; pass the
+server's -tls value (its fingerprint, or the shared secret) to have it checked
+```
+
+`-tls auto` is the same thing spelled out; `-tls off` is an explicit off.
+
+**A shared secret** — the certificate is *derived* from the value (scrypt
+into an ECDSA P-256 key, one scrypt call per side, ~60 ms), so both peers
+reach the same fingerprint without exchanging anything. Nothing but the
+certificate crosses the wire, and an impersonator cannot produce it
+without the secret.
+
+The same value also decides **who may connect**: a server started with one
+requires a certificate derived from that same secret, and the handshake
+only completes once the client proves it holds the matching private key. A
+client that brings a different secret, or none at all, is turned away — and
+told what to do about it:
+
+```
+msg="client failed" err="remote error: tls: certificate required — the server
+may have been started with -tls <shared secret>; pass the same value to the client"
+```
+
+Give the secret real entropy — `openssl rand -hex 16` — because a captured
+handshake lets anyone guess it offline, at scrypt's cost, and holding it
+grants full control.
+
+**A fingerprint** — pin the certificate the server is serving. The
+fingerprint is SHA-256 of the certificate's *public key*, so it is the
+same value for a given key however the certificate was produced, and
+that is exactly what lets the shared-secret mode compare certificates it
+generated independently on two machines.
 
 Two things worth knowing before you rely on it:
 
-- **The stream is encrypted but not verified by default.** `-tls` alone
-  accepts whatever certificate arrives: that keeps the video and input
-  away from passive eavesdroppers, but it would not stop a man in the
-  middle. Pass `-tls-fingerprint SHA256:…` (the value the server prints
-  when it runs) to have the client check the certificate, which is what
-  makes impersonation possible to refuse. A fingerprint that does not
-  match — or does not parse — is an error, never a silent acceptance.
-- **It does not authenticate the client.** The server still lets anyone
-  who completes the handshake take full control of the machine, which is
-  why the warning in its log stays. Keep the port on a trusted network,
-  or tunnel over SSH/WireGuard for anything else.
+- **A typo in a fingerprint is an error, never a silent acceptance.** A
+  value carrying the `SHA256:` prefix is always read as a fingerprint, so
+  `SHA256:abc` reports itself instead of quietly becoming a shared secret.
+  (`-tls-cert`/`-tls-key` must be given to serve a named certificate, and
+  cannot be combined with a secret.)
+- **Without a secret, it does not authenticate the client.** A server
+  started with plain `-tls` or `-tls SHA256:…` accepts anyone who completes
+  the handshake, which is why the warning in its log stays. Only a shared
+  secret gates admission — so keep the port on a trusted network in every
+  other case, or tunnel over SSH/WireGuard for anything else.
 
 
 ## How it works
@@ -386,7 +429,7 @@ internal/server      sessions, broadcast, pacing, stats
 internal/viewer      client window, canvas, dirty-region SHM blitter, input mapping
 internal/client      reconnect loop, decode, -upscale, -once / -snapshot-after CI modes
 internal/clipboard   bidirectional UTF-8 clipboard sync
-internal/tlsutil     TLS: certificate generation, fingerprints, pinning
+internal/tlsutil     TLS: certificate generation, fingerprints, shared secrets
 internal/testfill    integration-test helper (paint/check/clip-set/clip-watch)
 ```
 

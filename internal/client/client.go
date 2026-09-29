@@ -16,6 +16,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +41,7 @@ type Options struct {
 	SnapshotAfter time.Duration // >0: run live for D, then write the composited canvas as PNG and exit (CI mode; exercises keyframe + delta updates)
 	NoClipboard   bool          // disable clipboard synchronization
 	TLS           bool          // encrypt the stream
-	TLSPin        string        // pin the server certificate by SHA-256 fingerprint ("" = encrypt without verifying)
+	TLSValue      string        // the -tls argument: default mode, a fingerprint, or a shared secret
 }
 
 // Run drives the client until the window closes or ctx is canceled.
@@ -58,11 +59,6 @@ func Run(ctx context.Context, opts Options, log *slog.Logger) (err error) {
 	}
 	if opts.Upscale != 1 && opts.Upscale != 2 && opts.Upscale != 4 {
 		return fmt.Errorf("client: -upscale must be 1, 2 or 4")
-	}
-	// A pin with no TLS would be silently ignored, and an ignored pin is
-	// worse than none: the user believes the channel is verified.
-	if !opts.TLS && opts.TLSPin != "" {
-		return fmt.Errorf("client: -tls-fingerprint requires -tls")
 	}
 	if opts.Once {
 		return runOnce(ctx, opts, log)
@@ -509,6 +505,20 @@ func runOnce(ctx context.Context, opts Options, log *slog.Logger) error {
 	return fmt.Errorf("no keyframe within 10 s")
 }
 
+// certHint names the fix for the certificate failure a client is most
+// likely to cause: a server started with a shared secret, and a client that
+// brought none. What the protocol says on its own ("certificate required",
+// "bad certificate") describes the refusal without suggesting the remedy,
+// and a refusal with no remedy reads like a broken server. Clients that
+// supplied a value already get a message naming the mismatch, so they are
+// left alone.
+func certHint(unverified bool, err error) error {
+	if err == nil || !unverified || !strings.Contains(err.Error(), "certificate") {
+		return err
+	}
+	return fmt.Errorf("%w — the server may have been started with -tls <shared secret>; pass the same value to the client", err)
+}
+
 // dial connects and performs the version handshake.
 func dial(ctx context.Context, opts Options, log *slog.Logger, attempt int) (net.Conn, *proto.ServerHello, error) {
 	d := net.Dialer{Timeout: 5 * time.Second}
@@ -524,22 +534,27 @@ func dial(ctx context.Context, opts Options, log *slog.Logger, attempt int) (net
 	// Set before the handshake below: a peer that stalls mid-handshake is
 	// bounded by this deadline, not just the byte transfer.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	unverified := false
 	if opts.TLS {
-		cfg, err := tlsutil.ClientConfig(opts.TLSPin)
+		cfg, err := tlsutil.ClientConfig(opts.TLSValue)
 		if err != nil {
 			conn.Close()
 			return nil, nil, err
 		}
+		// A configuration with no verification callback accepted whatever
+		// certificate arrived; say so rather than let it look verified.
+		unverified = cfg.VerifyPeerCertificate == nil
 		tconn := tls.Client(conn, cfg)
 		if err := tconn.HandshakeContext(ctx); err != nil {
 			conn.Close()
-			return nil, nil, fmt.Errorf("tls handshake with %s: %w", opts.ServerAddr, err)
+			return nil, nil, certHint(unverified,
+				fmt.Errorf("tls handshake with %s: %w", opts.ServerAddr, err))
 		}
 		conn = tconn
-		// Once per successful session: accepting an unverified certificate
-		// is a decision the user should see stated, not discover later.
-		if opts.TLSPin == "" {
-			log.Warn("TLS: encrypting without verifying the server certificate; pin it with -tls-fingerprint to have it checked",
+		// Once per successful session: accepting an unverified certificate is
+		// a decision the user should see stated, not discover later.
+		if unverified {
+			log.Warn("TLS: encrypting without verifying the server certificate; pass the server's -tls value (its fingerprint, or the shared secret) to have it checked",
 				"server", opts.ServerAddr)
 		}
 	}
@@ -550,11 +565,14 @@ func dial(ctx context.Context, opts Options, log *slog.Logger, attempt int) (net
 		return nil, nil, err
 	}
 	// Read exactly the hello; a temporary buffered reader could swallow
-	// the beginning of the first frame when both arrive together.
+	// the beginning of the first frame when both arrive together. A server
+	// that rejects us for a certificate usually surfaces that here rather
+	// than during the handshake, since a TLS 1.3 client finishes its own
+	// flight before the server inspects what it sent.
 	t, _, payload, err := proto.ReadMsg(conn)
 	if err != nil {
 		conn.Close()
-		return nil, nil, err
+		return nil, nil, certHint(unverified, err)
 	}
 	if t != proto.MsgServerHello {
 		if t == proto.MsgClose {

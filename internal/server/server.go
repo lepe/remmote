@@ -45,6 +45,7 @@ type Options struct {
 	Window      uint32        // seed the window set with this window id
 	Maximize    bool          // with -exec/-window: maximize the shared window on the host screen
 	TLS         bool          // encrypt the stream with TLS (still no client authentication)
+	TLSValue    string        // the -tls argument: default mode, a shared secret, or a fingerprint
 	TLSCertFile string        // PEM certificate for -tls ("" = generate and cache one)
 	TLSKeyFile  string        // PEM private key for -tls ("" = generate and cache one)
 }
@@ -315,24 +316,38 @@ func (s *Server) Run(ctx context.Context) (err error) {
 		return fmt.Errorf("server: listen %s: %w", s.opts.ListenAddr, err)
 	}
 	fingerprint := ""
+	clientAuth := false
 	if s.opts.TLS {
-		cfg, tlsErr := tlsutil.ServerConfig(s.opts.TLSCertFile, s.opts.TLSKeyFile)
+		cfg, tlsErr := tlsutil.ServerConfig(s.opts.TLSCertFile, s.opts.TLSKeyFile, s.opts.TLSValue)
 		if tlsErr != nil {
 			_ = ln.Close()
 			return tlsErr
 		}
-		fingerprint = tlsutil.Fingerprint(cfg.Certificates[0].Certificate[0])
+		fp, fpErr := tlsutil.Fingerprint(cfg.Certificates[0].Certificate[0])
+		if fpErr != nil {
+			_ = ln.Close()
+			return fpErr
+		}
+		fingerprint = fp
+		// Only the shared-secret mode asks clients for a certificate; say
+		// which of the two you are in, since only one of them is a check.
+		clientAuth = cfg.ClientAuth != tls.NoClientCert
 		ln = tls.NewListener(ln, cfg)
 	}
-	if s.opts.TLS {
+	switch {
+	case !s.opts.TLS:
+		s.log.Warn("NO AUTHENTICATION, NO ENCRYPTION: anyone who can reach this port gains full control of this machine",
+			"listen", s.opts.ListenAddr, "display", xconn.DisplayString(s.opts.Display))
+	case clientAuth:
+		s.log.Warn("TLS: encrypted, and clients are authenticated — only a peer holding the shared secret can connect, and anyone with it gains full control of this machine",
+			"listen", s.opts.ListenAddr, "display", xconn.DisplayString(s.opts.Display),
+			"fingerprint", fingerprint)
+	default:
 		// Kept as loud as the plaintext banner: encryption alone does not
 		// make this machine private to anyone who can reach the port.
 		s.log.Warn("TLS: the stream is encrypted, but there is no client authentication — anyone who completes the handshake gains full control of this machine",
 			"listen", s.opts.ListenAddr, "display", xconn.DisplayString(s.opts.Display),
 			"fingerprint", fingerprint)
-	} else {
-		s.log.Warn("NO AUTHENTICATION, NO ENCRYPTION: anyone who can reach this port gains full control of this machine",
-			"listen", s.opts.ListenAddr, "display", xconn.DisplayString(s.opts.Display))
 	}
 	r := s.src.ScreenRect()
 	s.log.Info("listening", "addr", ln.Addr().String(),
