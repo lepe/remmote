@@ -3,7 +3,7 @@ BIN := bin
 
 .PHONY: all build build-webp test integration integration-shutdown lint vendor clean
 
-all: build
+all: build-webp
 
 ## build: pure-Go binaries (no CGo; jpeg/zraw/hybrid codecs, optional -tags webp)
 build:
@@ -23,6 +23,7 @@ integration: build
 	./scripts/integration-delta.sh hybrid 2 2
 	./scripts/integration-exec.sh
 	./scripts/integration-maximize.sh
+	./scripts/integration-tls.sh
 
 integration-shutdown: build
 	python3 scripts/integration-shutdown.py

@@ -20,6 +20,8 @@ func main() {
 		server      = flag.String("server", "", "remmote server address host:port (required)")
 		fastScale   = flag.Bool("fast-scale", false, "use faster nearest-neighbor scaling (less smooth when resizing)")
 		upscale     = flag.Int("upscale", 1, "magnify the stream by 1, 2 or 4 back to host resolution (match the server's -downscale)")
+		useTLS      = flag.Bool("tls", false, "encrypt the stream (the server must be started with -tls)")
+		tlsPin      = flag.String("tls-fingerprint", "", "also verify the server certificate against this SHA-256 fingerprint (printed by the server); without it the stream is encrypted but not verified")
 		quality     = flag.Int("quality", 0, "JPEG/WebP quality 1-100 to request (0 = server default; ZRAW stays lossless)")
 		once        = flag.Bool("once", false, "exit after the first keyframe (no window; CI mode)")
 		snapshot    = flag.String("snapshot", "", "with -once: write the first full frame as a PNG")
@@ -37,6 +39,10 @@ func main() {
 	}
 	if *upscale != 1 && *upscale != 2 && *upscale != 4 {
 		fmt.Fprintln(os.Stderr, "remmote-client: -upscale must be 1, 2 or 4")
+		os.Exit(2)
+	}
+	if !*useTLS && *tlsPin != "" {
+		fmt.Fprintln(os.Stderr, "remmote-client: -tls-fingerprint requires -tls")
 		os.Exit(2)
 	}
 	if *quality != 0 && (*quality < 1 || *quality > 100) {
@@ -68,6 +74,8 @@ func main() {
 		Snapshot:      *snapshot,
 		SnapshotAfter: *snapAfter,
 		NoClipboard:   *noClipboard,
+		TLS:           *useTLS,
+		TLSPin:        *tlsPin,
 	}, log); err != nil {
 		log.Error("client failed", "err", err)
 		os.Exit(1)

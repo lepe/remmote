@@ -27,10 +27,13 @@ for SysV shared memory, stdlib for TCP/JPEG/logging. The default build has
 **zero CGo** and cross-compiles anywhere Go does.
 
 > [!WARNING]
-> **No authentication. No encryption.** Anyone who can reach the server's
-> TCP port gets live view *and full keyboard/mouse control* of the host.
-> Use on a trusted LAN only. For anything else, tunnel the TCP connection
-> through SSH or WireGuard:
+> **No authentication.** Anyone who can reach the server's TCP port gets
+> live view *and full keyboard/mouse control* of the host. Use on a
+> trusted LAN only. Pass `-tls` on both sides to encrypt the stream in
+> transit — that stops eavesdropping, but the server still accepts any
+> client that completes the handshake, so it does not make the host
+> private to you. For anything else, tunnel the connection through SSH or
+> WireGuard:
 >
 > ```sh
 > ssh -L 7677:localhost:7677 user@host   # then: remmote-client -server localhost:7677
@@ -151,6 +154,9 @@ keyframe (2 s).
 | `-exec` | — | run this command and share only its windows (e.g. `-exec xcalc`) |
 | `-window` | — | share this existing window id (hex) and windows it spawns |
 | `-maximize` | off | with `-exec`/`-window`: maximize the shared window onto the host screen once it appears |
+| `-tls` | off | encrypt the stream with TLS 1.3 (prints a fingerprint for clients to pin) |
+| `-tls-cert` | — | with `-tls`: PEM certificate to use (default: generate and cache one) |
+| `-tls-key` | — | with `-tls`: PEM private key to use (default: generate and cache one) |
 | `-no-clipboard` | off | disable clipboard synchronization |
 | `-v` / `-log-json` | off | debug level / JSON logs |
 
@@ -163,6 +169,8 @@ keyframe (2 s).
 | `-quality` | `0` | JPEG/WebP quality 1-100; 0 = keep default. ZRAW remains lossless |
 | `-fast-scale` | off | use nearest-neighbor viewer scaling for lower CPU use, with rougher edges |
 | `-upscale` | `1` | magnify the stream by 1, 2 or 4 back to host resolution; match the server's `-downscale` so the canvas, window and pointer mapping use host coordinates |
+| `-tls` | off | encrypt the stream (the server must be started with `-tls`) |
+| `-tls-fingerprint` | — | additionally verify the server certificate against this SHA-256 fingerprint (printed by the server at startup) |
 | `-once` | off | exit after the first keyframe (no window; CI mode) |
 | `-snapshot` | — | with `-once`: write the first full frame as a PNG |
 | `-snapshot-after` | — | with `-snapshot`: run the live session for D, write the composited canvas (keyframe + deltas), exit (CI) |
@@ -222,6 +230,35 @@ reduces that demand at the cost of slower visual feedback. A longer server
 See [PERFORMANCE.md](PERFORMANCE.md) for measured tradeoffs and benchmark commands.
 
 
+### Encryption (TLS)
+
+Add `-tls` to both sides — that is the whole setup:
+
+```sh
+./bin/remmote-server -tls
+./bin/remmote-client -server HOST:7677 -tls
+```
+
+The server generates a certificate the first time it starts and caches it
+under `~/.config/remmote/`, so the fingerprint stays the same across
+restarts. Point `-tls-cert`/`-tls-key` at your own pair to use a real one
+instead.
+
+Two things worth knowing before you rely on it:
+
+- **The stream is encrypted but not verified by default.** `-tls` alone
+  accepts whatever certificate arrives: that keeps the video and input
+  away from passive eavesdroppers, but it would not stop a man in the
+  middle. Pass `-tls-fingerprint SHA256:…` (the value the server prints
+  when it runs) to have the client check the certificate, which is what
+  makes impersonation possible to refuse. A fingerprint that does not
+  match — or does not parse — is an error, never a silent acceptance.
+- **It does not authenticate the client.** The server still lets anyone
+  who completes the handshake take full control of the machine, which is
+  why the warning in its log stays. Keep the port on a trusted network,
+  or tunnel over SSH/WireGuard for anything else.
+
+
 ## How it works
 
 ```
@@ -277,7 +314,8 @@ See [PERFORMANCE.md](PERFORMANCE.md) for measured tradeoffs and benchmark comman
 
 ## Wire protocol (v3)
 
-Plain TCP, big-endian. Frame: `'R' 'M' type flags length:u32 payload`
+TCP, big-endian, optionally wrapped in TLS (`-tls`). Frame:
+`'R' 'M' type flags length:u32 payload`
 (max payload 32 MiB). Client speaks first. v2 added the Clipboard
 message; v3 added the ZRAW codec. The server refuses a mismatched
 `ClientHello.version`, so a v2 client now gets an explicit refusal
@@ -348,6 +386,7 @@ internal/server      sessions, broadcast, pacing, stats
 internal/viewer      client window, canvas, dirty-region SHM blitter, input mapping
 internal/client      reconnect loop, decode, -upscale, -once / -snapshot-after CI modes
 internal/clipboard   bidirectional UTF-8 clipboard sync
+internal/tlsutil     TLS: certificate generation, fingerprints, pinning
 internal/testfill    integration-test helper (paint/check/clip-set/clip-watch)
 ```
 

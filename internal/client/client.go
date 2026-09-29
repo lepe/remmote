@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/lepe/remmote/internal/clipboard"
 	"github.com/lepe/remmote/internal/proto"
+	"github.com/lepe/remmote/internal/tlsutil"
 	"github.com/lepe/remmote/internal/viewer"
 )
 
@@ -37,6 +39,8 @@ type Options struct {
 	Snapshot      string        // with Once: write the first full frame as PNG
 	SnapshotAfter time.Duration // >0: run live for D, then write the composited canvas as PNG and exit (CI mode; exercises keyframe + delta updates)
 	NoClipboard   bool          // disable clipboard synchronization
+	TLS           bool          // encrypt the stream
+	TLSPin        string        // pin the server certificate by SHA-256 fingerprint ("" = encrypt without verifying)
 }
 
 // Run drives the client until the window closes or ctx is canceled.
@@ -54,6 +58,11 @@ func Run(ctx context.Context, opts Options, log *slog.Logger) (err error) {
 	}
 	if opts.Upscale != 1 && opts.Upscale != 2 && opts.Upscale != 4 {
 		return fmt.Errorf("client: -upscale must be 1, 2 or 4")
+	}
+	// A pin with no TLS would be silently ignored, and an ignored pin is
+	// worse than none: the user believes the channel is verified.
+	if !opts.TLS && opts.TLSPin != "" {
+		return fmt.Errorf("client: -tls-fingerprint requires -tls")
 	}
 	if opts.Once {
 		return runOnce(ctx, opts, log)
@@ -139,6 +148,12 @@ func Run(ctx context.Context, opts Options, log *slog.Logger) (err error) {
 		// Connect (with backoff on repeat attempts).
 		conn, hello, err := dial(ctx, opts, log, attempt)
 		if err != nil {
+			// Never fail silently: a dial error swallowed by the backoff
+			// loop leaves the user with a client that says nothing while
+			// the server logs the symptom.
+			if ctx.Err() == nil {
+				log.Warn("connect failed; retrying", "server", opts.ServerAddr, "err", err)
+			}
 			select {
 			case <-ctx.Done():
 				return nil
@@ -174,7 +189,7 @@ func Run(ctx context.Context, opts Options, log *slog.Logger) (err error) {
 		}
 
 		log.Info("connected", "server", opts.ServerAddr, "screen",
-			fmt.Sprintf("%dx%d", hello.Width, hello.Height), "name", hello.Name)
+			fmt.Sprintf("%dx%d", hello.Width, hello.Height), "name", hello.Name, "tls", opts.TLS)
 
 		netErr := session(ctx, conn, win, clip, q, up, log)
 
@@ -455,7 +470,7 @@ func runOnce(ctx context.Context, opts Options, log *slog.Logger) error {
 	stopCancel := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stopCancel()
 	log.Info("connected", "server", opts.ServerAddr, "name", hello.Name,
-		"screen", fmt.Sprintf("%dx%d", hello.Width, hello.Height))
+		"screen", fmt.Sprintf("%dx%d", hello.Width, hello.Height), "tls", opts.TLS)
 
 	br := bufio.NewReader(conn)
 	dec := newDecoder()
@@ -503,10 +518,31 @@ func dial(ctx context.Context, opts Options, log *slog.Logger, attempt int) (net
 	}
 	stopCancel := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stopCancel()
-	if tc, ok := conn.(*net.TCPConn); ok {
+	if tc := tlsutil.TCP(conn); tc != nil {
 		_ = tc.SetNoDelay(true)
 	}
+	// Set before the handshake below: a peer that stalls mid-handshake is
+	// bounded by this deadline, not just the byte transfer.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if opts.TLS {
+		cfg, err := tlsutil.ClientConfig(opts.TLSPin)
+		if err != nil {
+			conn.Close()
+			return nil, nil, err
+		}
+		tconn := tls.Client(conn, cfg)
+		if err := tconn.HandshakeContext(ctx); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("tls handshake with %s: %w", opts.ServerAddr, err)
+		}
+		conn = tconn
+		// Once per successful session: accepting an unverified certificate
+		// is a decision the user should see stated, not discover later.
+		if opts.TLSPin == "" {
+			log.Warn("TLS: encrypting without verifying the server certificate; pin it with -tls-fingerprint to have it checked",
+				"server", opts.ServerAddr)
+		}
+	}
 
 	hello := &proto.ClientHello{Version: proto.ProtoVersion}
 	if err := proto.WriteMsg(conn, proto.MsgClientHello, 0, hello.Encode()); err != nil {

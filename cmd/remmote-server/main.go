@@ -38,6 +38,9 @@ func main() {
 		execCmd     = flag.String("exec", "", "run this command and share only its windows (e.g. -exec xcalc)")
 		windowID    = flag.String("window", "", "share this existing window id (hex) and windows it spawns")
 		maximize    = flag.Bool("maximize", false, "with -exec/-window: maximize the shared window on the host screen")
+		useTLS      = flag.Bool("tls", false, "encrypt the stream with TLS (prints a fingerprint clients can pin; still no client authentication)")
+		tlsCert     = flag.String("tls-cert", "", "with -tls: PEM certificate to use (default: generate and cache one)")
+		tlsKey      = flag.String("tls-key", "", "with -tls: PEM private key to use (default: generate and cache one)")
 		verbose     = flag.Bool("v", false, "debug logging")
 		logJSON     = flag.Bool("log-json", false, "JSON log output")
 	)
@@ -66,6 +69,14 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	if (*tlsCert == "") != (*tlsKey == "") {
+		log.Error("-tls-cert and -tls-key must be given together")
+		os.Exit(2)
+	}
+	if !*useTLS && (*tlsCert != "" || *tlsKey != "") {
+		log.Error("-tls-cert/-tls-key require -tls")
+		os.Exit(2)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -82,6 +93,9 @@ func main() {
 		Exec:        *execCmd,
 		Window:      uint32(winID),
 		Maximize:    *maximize,
+		TLS:         *useTLS,
+		TLSCertFile: *tlsCert,
+		TLSKeyFile:  *tlsKey,
 	}, log)
 	if err != nil {
 		if ctx.Err() != nil {

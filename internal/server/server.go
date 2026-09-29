@@ -7,6 +7,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"image"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 	"github.com/lepe/remmote/internal/input"
 	"github.com/lepe/remmote/internal/launch"
 	"github.com/lepe/remmote/internal/proto"
+	"github.com/lepe/remmote/internal/tlsutil"
 	"github.com/lepe/remmote/internal/xconn"
 	"github.com/lepe/remmote/internal/xwin"
 )
@@ -42,6 +44,9 @@ type Options struct {
 	Exec        string        // run this command and share only its windows
 	Window      uint32        // seed the window set with this window id
 	Maximize    bool          // with -exec/-window: maximize the shared window on the host screen
+	TLS         bool          // encrypt the stream with TLS (still no client authentication)
+	TLSCertFile string        // PEM certificate for -tls ("" = generate and cache one)
+	TLSKeyFile  string        // PEM private key for -tls ("" = generate and cache one)
 }
 
 // StreamSource is the capture backend the server streams: the root
@@ -309,8 +314,26 @@ func (s *Server) Run(ctx context.Context) (err error) {
 	if err != nil {
 		return fmt.Errorf("server: listen %s: %w", s.opts.ListenAddr, err)
 	}
-	s.log.Warn("NO AUTHENTICATION, NO ENCRYPTION: anyone who can reach this port gains full control of this machine",
-		"listen", s.opts.ListenAddr, "display", xconn.DisplayString(s.opts.Display))
+	fingerprint := ""
+	if s.opts.TLS {
+		cfg, tlsErr := tlsutil.ServerConfig(s.opts.TLSCertFile, s.opts.TLSKeyFile)
+		if tlsErr != nil {
+			_ = ln.Close()
+			return tlsErr
+		}
+		fingerprint = tlsutil.Fingerprint(cfg.Certificates[0].Certificate[0])
+		ln = tls.NewListener(ln, cfg)
+	}
+	if s.opts.TLS {
+		// Kept as loud as the plaintext banner: encryption alone does not
+		// make this machine private to anyone who can reach the port.
+		s.log.Warn("TLS: the stream is encrypted, but there is no client authentication — anyone who completes the handshake gains full control of this machine",
+			"listen", s.opts.ListenAddr, "display", xconn.DisplayString(s.opts.Display),
+			"fingerprint", fingerprint)
+	} else {
+		s.log.Warn("NO AUTHENTICATION, NO ENCRYPTION: anyone who can reach this port gains full control of this machine",
+			"listen", s.opts.ListenAddr, "display", xconn.DisplayString(s.opts.Display))
+	}
 	r := s.src.ScreenRect()
 	s.log.Info("listening", "addr", ln.Addr().String(),
 		"source", fmt.Sprintf("%dx%d", r.Dx(), r.Dy()),
@@ -451,13 +474,17 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 }
 
 func (s *Server) handshake(conn net.Conn) (*session, error) {
-	if tc, ok := conn.(*net.TCPConn); ok {
+	// Look through a TLS wrapper too, or these stop applying the moment
+	// -tls is switched on.
+	if tc := tlsutil.TCP(conn); tc != nil {
 		_ = tc.SetNoDelay(true)
 		// Bound stale frames already handed to TCP; a multi-MiB buffer can
 		// hide seconds of desktop updates from the bounded outbox.
 		_ = tc.SetWriteBuffer(256 << 10)
 		_ = tc.SetReadBuffer(1 << 20)
 	}
+	// Set before the first read: with TLS that read also runs the
+	// handshake, so a peer that stalls mid-handshake is bounded too.
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
 	// This bufio.Reader must live for the whole session: it may hold
