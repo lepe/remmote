@@ -30,7 +30,12 @@ cleanup() {
 		[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
 	done
 	for pid in "${XVFB_PIDS[@]:-}"; do
-		[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+		[ -n "$pid" ] || continue
+		kill "$pid" 2>/dev/null || true
+		# Reap before returning: a display number is only free again
+		# once its X server is really gone, and the next script in the
+		# suite takes the same number.
+		wait "$pid" 2>/dev/null || true
 	done
 	rm -f "$LOG" "$CLOG" "$OUT"
 	rm -rf "$BIN"
@@ -50,6 +55,12 @@ XVFB_PIDS+=($!)
 Xvfb "$VIEWDISP" -screen 0 800x600x24 >/dev/null 2>&1 &
 XVFB_PIDS+=($!)
 sleep 0.8
+for pid in "${XVFB_PIDS[@]}"; do
+	kill -0 "$pid" 2>/dev/null || {
+		echo "FAIL: an Xvfb did not start (is the display number still in use?)"
+		exit 1
+	}
+done
 
 wait_listening() {
 	for _ in $(seq 1 100); do

@@ -18,6 +18,7 @@ test:
 
 integration: build
 	./scripts/integration-control.sh
+	./scripts/integration-session.sh
 	./scripts/integration.sh
 	./scripts/integration.sh jpeg
 	./scripts/integration-delta.sh

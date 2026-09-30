@@ -168,8 +168,24 @@ the same shape as a saved connection profile:
 ```
 
 `source` is `desktop`, `app` (with `app.command`) or `window` (with
-`window.id`); `display.kind` is `existing` or, when the daemon learns to
-make displays, `create`.
+`window.id`). `display.kind` is `existing` (share a display that is
+already there) or `create` — the daemon then makes the display for the
+session and destroys it, its window manager and its cookie again when
+the session ends:
+
+```json
+{
+  "source": "desktop",
+  "display": {"kind": "create", "create": {"server": "xvfb", "size": "800x600", "wm": "openbox"}},
+  "stream": {"codec": "hybrid"}
+}
+```
+
+`create.server` is `xvfb` (headless) or `xephyr` (nested in another
+session, which needs `create.hostDisplay`); `create.wm` is one of the
+window managers `GET /api/v1/host` reports, or `"none"`. The display
+gets its own magic cookie, so it is not open to anyone else on the
+machine — and the viewer's stream is what proves the cookie works.
 
 ### Your own display (headless or nested)
 

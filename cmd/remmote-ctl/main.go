@@ -107,7 +107,7 @@ func main() {
 			fatal(err)
 		}
 		defer unsub()
-		if code := waitSession(ctx, events); code != 0 {
+		if code := waitSession(ctx, events, c); code != 0 {
 			os.Exit(code)
 		}
 
@@ -146,9 +146,9 @@ func main() {
 }
 
 // waitSession follows events until the session is live (0) or has failed
-// (1). A session that fails keeps its record, error and log on the
-// session command.
-func waitSession(ctx context.Context, events <-chan api.Event) int {
+// (1) — and a failure is reported with the daemon's own reason, so
+// nobody has to go and read its log.
+func waitSession(ctx context.Context, events <-chan api.Event, c *api.Client) int {
 	for {
 		select {
 		case <-ctx.Done():
@@ -161,6 +161,9 @@ func waitSession(ctx context.Context, events <-chan api.Event) int {
 			case api.StateLive:
 				return 0
 			case api.StateLost:
+				if s, err := c.Session(ctx); err == nil && s != nil && s.Error != "" {
+					fmt.Fprintln(os.Stderr, "remmote-ctl: the session failed:", s.Error)
+				}
 				return 1
 			}
 		}

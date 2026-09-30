@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/damage"
@@ -40,11 +41,32 @@ type Ext struct {
 	XTEST  bool // input injection
 }
 
+// dialRetry opens the connection, retrying the setup phase briefly. The
+// delays are short: a dropped connection is a hiccup, not a condition.
+func dialRetry(display string) (*xgb.Conn, error) {
+	var err error
+	for _, delay := range []time.Duration{0, 50 * time.Millisecond, 150 * time.Millisecond} {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		var x *xgb.Conn
+		if x, err = xgb.NewConnDisplay(display); err == nil {
+			return x, nil
+		}
+	}
+	return nil, err
+}
+
 // Dial connects to display ("" means $DISPLAY) and initializes the
 // extensions remmote needs. Only TrueColor roots at 24/32 depth with 32
 // bits per pixel are supported; anything else fails fast.
+//
+// The connection itself is retried briefly: an X server that has just
+// seen a connection close can drop the next one in its setup phase — a
+// readiness probe followed at once by the real connection is enough to
+// trigger it — and a momentary drop is no reason to fail a session.
 func Dial(display string) (*Conn, error) {
-	x, err := xgb.NewConnDisplay(display)
+	x, err := dialRetry(display)
 	if err != nil {
 		return nil, fmt.Errorf("xconn: connect %q: %w", DisplayString(display), err)
 	}

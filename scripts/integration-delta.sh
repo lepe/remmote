@@ -42,7 +42,12 @@ FILL_B_PID=""
 
 cleanup() {
 	for pid in "$SRV_PID" "$FILL_A_PID" "$FILL_B_PID" "${CLIENT_PID:-}" "$XVFB_A" "$XVFB_B"; do
-		[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+		[ -n "$pid" ] || continue
+		kill "$pid" 2>/dev/null || true
+		# Reap before returning: a display number is only free again
+		# once its X server is really gone, and the next script in the
+		# suite takes the same number.
+		wait "$pid" 2>/dev/null || true
 	done
 	rm -f "$SNAP" "$LOG" "$CLOG"
 }
@@ -62,6 +67,12 @@ XVFB_A=$!
 Xvfb :992 -screen 0 1280x800x24 >/dev/null 2>&1 &
 XVFB_B=$!
 sleep 0.8
+for pid in "$XVFB_A" "$XVFB_B"; do
+	kill -0 "$pid" 2>/dev/null || {
+		echo "FAIL: an Xvfb did not start (is the display number still in use?)"
+		exit 1
+	}
+done
 
 echo "== painting host screen $COLOR_A"
 /tmp/remmote-testfill -display :991 -color "$COLOR_A" -hold 40s >/dev/null 2>&1 &

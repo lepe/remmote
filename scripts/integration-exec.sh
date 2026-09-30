@@ -24,7 +24,12 @@ XVFB_PID=""
 SRV_PID=""
 cleanup() {
 	for pid in "${SRV_PID:-}" "${XVFB_PID:-}"; do
-		[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+		[ -n "$pid" ] || continue
+		kill "$pid" 2>/dev/null || true
+		# Reap before returning: a display number is only free again
+		# once its X server is really gone, and the next script in the
+		# suite takes the same number.
+		wait "$pid" 2>/dev/null || true
 	done
 	rm -f "$SNAP" "$LOG" "$CLOG"
 	rm -rf "$BIN"
@@ -50,6 +55,10 @@ echo "== starting Xvfb $DISP"
 Xvfb $DISP -screen 0 800x600x24 >/dev/null 2>&1 &
 XVFB_PID=$!
 sleep 0.8
+kill -0 "$XVFB_PID" 2>/dev/null || {
+	echo "FAIL: Xvfb did not start on $DISP (is the number still in use?)"
+	exit 1
+}
 
 echo "== starting server (-exec launcher that exits immediately)"
 ./bin/remmote-server -display $DISP -listen "127.0.0.1:$PORT" \

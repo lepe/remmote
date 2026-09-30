@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/lepe/remmote/internal/api"
+	"github.com/lepe/remmote/internal/hostenv"
 	"github.com/lepe/remmote/internal/proto"
 	"github.com/lepe/remmote/internal/stream"
 	"github.com/lepe/remmote/internal/tlsutil"
@@ -84,6 +85,7 @@ type session struct {
 	state   string
 	err     string
 	started time.Time
+	display string         // the display actually shared ("" until one is resolved)
 	st      *stream.Stream // nil while starting or after a failure
 }
 
@@ -183,11 +185,12 @@ func (d *Daemon) mux() *http.ServeMux {
 
 func (d *Daemon) handleHost(w http.ResponseWriter, r *http.Request) {
 	h := api.HostInfo{
-		ProtoVersion: int(proto.ProtoVersion),
-		Codecs:       api.Codecs(),
-		TLS:          d.opts.TLS,
-		CanCreate:    false, // display creation: hostenv stage
-		AllowExec:    len(d.opts.AllowExec) > 0,
+		ProtoVersion:   int(proto.ProtoVersion),
+		Codecs:         api.Codecs(),
+		TLS:            d.opts.TLS,
+		CanCreate:      hostenv.Available(),
+		WindowManagers: hostenv.WMs(),
+		AllowExec:      len(d.opts.AllowExec) > 0,
 	}
 	d.mu.Lock()
 	if d.sess != nil {
@@ -228,6 +231,17 @@ func (d *Daemon) handleSessionPost(w http.ResponseWriter, r *http.Request) {
 	if _, err := spec.StreamOptions(); err != nil {
 		apiError(w, http.StatusBadRequest, "%v", err)
 		return
+	}
+	if spec.Display.Kind == api.KindCreate {
+		if !hostenv.Available() {
+			apiError(w, http.StatusBadRequest,
+				"this daemon cannot create displays: Xvfb or Xephyr is not installed")
+			return
+		}
+		if wm := spec.Display.Create.WM; wm != "" && !hostenv.HasWM(wm) {
+			apiError(w, http.StatusBadRequest, "window manager %q is not installed here", wm)
+			return
+		}
 	}
 	if spec.Source == api.SourceApp && !d.execAllowed(spec.App.Command) {
 		apiError(w, http.StatusForbidden,
@@ -330,11 +344,14 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 
 	d.mu.Lock()
 	if d.sess != s || s.st == nil || s.state != api.StateLive || s.stopping {
-		state := s.state
+		state, errMsg := s.state, s.err
 		d.mu.Unlock()
-		if state == api.StateStarting {
+		switch state {
+		case api.StateStarting:
 			apiError(w, http.StatusConflict, "the session is still starting; try again")
-		} else {
+		case api.StateLost:
+			apiError(w, http.StatusConflict, "the session failed to start: %s", errMsg)
+		default:
 			apiError(w, http.StatusNotFound, "no session is running on this daemon")
 		}
 		return
@@ -408,18 +425,36 @@ func (d *Daemon) startSession(spec api.SessionSpec, replace bool) (*api.SessionI
 }
 
 // runSession builds the stream, serves it, and releases everything it
-// held — launched app, capture source, X connections — before returning.
+// held — created display, launched app, capture source, X connections —
+// before returning.
 func (d *Daemon) runSession(s *session) {
 	defer close(s.done)
 
-	opts, err := s.spec.StreamOptions()
+	// The session's log lines go to the daemon's log *and* into the ring
+	// the API serves, in the same text format.
+	sessionLog := slog.New(&teeHandler{base: d.log.Handler(), sink: d.ring.Add})
+
+	// Resolve the display first: create one when asked — it dies with
+	// the session — and otherwise open what is already there.
+	disp, err := d.openDisplay(s, sessionLog)
 	if err != nil {
 		d.fail(s, err)
 		return
 	}
-	// The session's log lines go to the daemon's log *and* into the ring
-	// the API serves, in the same text format.
-	sessionLog := slog.New(&teeHandler{base: d.log.Handler(), sink: d.ring.Add})
+	defer disp.Close()
+	disp.Activate() // every X client this session starts sees its cookie
+
+	d.mu.Lock()
+	s.display = disp.Name
+	d.mu.Unlock()
+
+	spec := s.spec
+	spec.Display = api.DisplaySpec{Kind: api.KindExisting, Name: disp.Name}
+	opts, err := spec.StreamOptions()
+	if err != nil {
+		d.fail(s, err)
+		return
+	}
 	st, err := stream.NewContext(s.ctx, opts, sessionLog)
 	if err != nil {
 		d.fail(s, err)
@@ -450,6 +485,21 @@ func (d *Daemon) runSession(s *session) {
 	<-runDone
 	s.attachWG.Wait() // no viewer may inject input after this point
 	st.Close()
+}
+
+// openDisplay opens the display the spec names, or creates one for the
+// session when it asks for that — a display that dies with the session.
+func (d *Daemon) openDisplay(s *session, log *slog.Logger) (*hostenv.Display, error) {
+	if s.spec.Display.Kind == api.KindCreate {
+		c := s.spec.Display.Create
+		return hostenv.Create(s.ctx, hostenv.CreateOptions{
+			Server:      c.Server,
+			Size:        c.Size,
+			WM:          c.WM,
+			HostDisplay: c.HostDisplay,
+		}, log)
+	}
+	return hostenv.Open(s.spec.Display.Name, log)
 }
 
 // fail records a session that never came up. The record stays — with its
@@ -501,12 +551,12 @@ func (d *Daemon) infoLocked(s *session, withLog bool) api.SessionInfo {
 		Spec:      s.spec,
 		Error:     s.err,
 		StartedAt: s.started,
+		Display:   s.display,
 	}
 	if s.st != nil {
 		r := s.st.ScreenRect()
 		info.Width, info.Height = r.Dx(), r.Dy()
 		info.AppPID = s.st.AppPID()
-		info.Display = s.spec.Display.Name
 	}
 	if withLog {
 		info.Log = d.ring.Tail()

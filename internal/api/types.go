@@ -58,7 +58,7 @@ type DisplaySpec struct {
 type CreateSpec struct {
 	Server      string `json:"server"`                // "xvfb" or "xephyr"
 	Size        string `json:"size,omitempty"`        // e.g. "1280x800"
-	WM          string `json:"wm,omitempty"`          // window manager to run inside
+	WM          string `json:"wm,omitempty"`          // window manager to run inside; empty or "none" = none
 	HostDisplay string `json:"hostDisplay,omitempty"` // "xephyr": where its window opens
 }
 
@@ -101,12 +101,13 @@ const (
 // HostInfo is what a daemon says about itself: enough for a client to
 // fill in its option lists without guessing what the host has.
 type HostInfo struct {
-	ProtoVersion int          `json:"protoVersion"` // remmote stream protocol this daemon speaks
-	Codecs       []string     `json:"codecs"`       // what it can actually encode with
-	TLS          bool         `json:"tls"`          // the listener is encrypted
-	CanCreate    bool         `json:"canCreate"`    // display creation is available (stage: hostenv)
-	AllowExec    bool         `json:"allowExec"`    // launching an app is permitted
-	Session      *SessionInfo `json:"session,omitempty"`
+	ProtoVersion   int          `json:"protoVersion"`   // remmote stream protocol this daemon speaks
+	Codecs         []string     `json:"codecs"`         // what it can actually encode with
+	TLS            bool         `json:"tls"`            // the listener is encrypted
+	CanCreate      bool         `json:"canCreate"`      // it can create displays (Xvfb/Xephyr installed)
+	WindowManagers []string     `json:"windowManagers"` // window managers installed here, best first
+	AllowExec      bool         `json:"allowExec"`      // launching an app is permitted
+	Session        *SessionInfo `json:"session,omitempty"`
 }
 
 // Session states. "lost" is a session that failed to start or has ended:
@@ -206,6 +207,12 @@ func (d *DisplaySpec) validate() error {
 			return fmt.Errorf("display.create.server must be %s or %s (got %q)",
 				CreateXvfb, CreateXephyr, d.Create.Server)
 		}
+		// The window manager is optional, and its "none" words all mean
+		// the same thing: run no window manager at all.
+		switch strings.ToLower(strings.TrimSpace(d.Create.WM)) {
+		case "none", "no", "off", "-":
+			d.Create.WM = ""
+		}
 		if d.Create.Size != "" {
 			w, h, err := parseSize(d.Create.Size)
 			if err != nil {
@@ -274,15 +281,12 @@ func (s SessionSpec) WindowID() (uint32, error) {
 	return s.Window.parseID()
 }
 
-// StreamOptions maps a validated spec onto the stream's options.
-// Display creation is refused here: a stream can only share a display
-// that exists.
+// StreamOptions maps a validated spec onto the stream's options. A spec
+// that creates a display has no name yet — the daemon resolves it first
+// and maps the display it got.
 func (s SessionSpec) StreamOptions() (stream.Options, error) {
 	if err := s.Validate(); err != nil {
 		return stream.Options{}, err
-	}
-	if s.Display.Kind == KindCreate {
-		return stream.Options{}, fmt.Errorf("this daemon cannot create displays; share an existing one")
 	}
 	codec, err := codecID(s.Stream.Codec)
 	if err != nil {

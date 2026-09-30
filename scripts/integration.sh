@@ -25,7 +25,12 @@ FILL_PID=""
 
 cleanup() {
 	for pid in "${SRV_PID:-}" "${FILL_PID:-}" "${XVFB_PID:-}"; do
-		[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+		[ -n "$pid" ] || continue
+		kill "$pid" 2>/dev/null || true
+		# Reap before returning: a display number is only free again
+		# once its X server is really gone, and the next script in the
+		# suite takes the same number.
+		wait "$pid" 2>/dev/null || true
 	done
 	rm -f "$SNAP" "$LOG"
 }

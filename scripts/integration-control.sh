@@ -27,7 +27,12 @@ SRV_PID=""
 FILL_PID=""
 cleanup() {
 	for pid in "${SRV_PID:-}" "${FILL_PID:-}" "${XVFB_PID:-}"; do
-		[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+		[ -n "$pid" ] || continue
+		kill "$pid" 2>/dev/null || true
+		# Reap before returning: a display number is only free again
+		# once its X server is really gone, and the next script in the
+		# suite takes the same number.
+		wait "$pid" 2>/dev/null || true
 	done
 	rm -f "$SNAP" "$LOG"
 	rm -rf "$SPEC"
@@ -103,7 +108,11 @@ grep -q "does not allow launching" "$SPEC/out" || {
 }
 
 echo "== starting a desktop session over the API"
-ctl start -spec "$SPEC/desktop.json" -wait
+ctl start -spec "$SPEC/desktop.json" -wait || {
+	echo "FAIL: the session did not come up"
+	ctl session || true
+	exit 1
+}
 ctl session | grep -q '"state": "live"' || { echo "FAIL: the session is not live"; exit 1; }
 
 echo "== viewer 1 attaches"
@@ -135,7 +144,11 @@ EVENTS_PID=$!
 sleep 0.5
 
 echo "== replace: terminate and start mine"
-ctl start -spec "$SPEC/replaced.json" -replace -wait
+ctl start -spec "$SPEC/replaced.json" -replace -wait || {
+	echo "FAIL: the replacement did not come up"
+	ctl session || true
+	exit 1
+}
 SESSION=$(ctl session)
 echo "$SESSION" | grep -q '"state": "live"' || { echo "FAIL: the replacement is not live"; exit 1; }
 echo "$SESSION" | grep -q '"codec": "zraw"' || {
