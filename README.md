@@ -536,7 +536,8 @@ internal/xconn       X bootstrap, extension detection, screen facts
 internal/capture     SHM + damage + fallback capture (+tests)
 internal/encode      JPEG / ZRAW (zstd) / hybrid / WebP (tag webp) encoders
 internal/input       keymap + XTEST injector (+tests)
-internal/server      sessions, broadcast, pacing, stats
+internal/server      network front: listen, TLS, accept
+internal/stream      one shared surface + its viewers: capture, broadcast, pacing, stats
 internal/viewer      client window, canvas, dirty-region SHM blitter, input mapping
 internal/client      reconnect loop, decode, -upscale, -once / -snapshot-after CI modes
 internal/clipboard   bidirectional UTF-8 clipboard sync

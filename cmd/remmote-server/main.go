@@ -20,6 +20,7 @@ import (
 	"github.com/lepe/remmote/internal/encode"
 	"github.com/lepe/remmote/internal/proto"
 	"github.com/lepe/remmote/internal/server"
+	"github.com/lepe/remmote/internal/stream"
 	"github.com/lepe/remmote/internal/tlsutil"
 	"github.com/lepe/remmote/internal/xconn"
 )
@@ -86,22 +87,24 @@ func main() {
 	defer stop()
 	go func() { <-ctx.Done(); stop() }()
 	srv, err := server.NewContext(ctx, server.Options{
-		Display:       *display,
-		ListenAddr:    *listen,
-		FPS:           *fps,
-		Downscale:     *downscale,
-		Quality:       *quality,
-		Codec:         codecID,
-		FullRefresh:   *refresh,
-		NoClipboard:   *noClipboard,
-		Exec:          *execCmd,
-		Window:        uint32(winID),
-		Maximize:      *maximize,
-		ResizeDesktop: *resizeDesk,
-		TLS:           tlsutil.On(*useTLS),
-		TLSValue:      *useTLS,
-		TLSCertFile:   *tlsCert,
-		TLSKeyFile:    *tlsKey,
+		Stream: stream.Options{
+			Display:       *display,
+			FPS:           *fps,
+			Downscale:     *downscale,
+			Quality:       *quality,
+			Codec:         codecID,
+			FullRefresh:   *refresh,
+			NoClipboard:   *noClipboard,
+			Exec:          *execCmd,
+			Window:        uint32(winID),
+			Maximize:      *maximize,
+			ResizeDesktop: *resizeDesk,
+		},
+		ListenAddr:  *listen,
+		TLS:         tlsutil.On(*useTLS),
+		TLSValue:    *useTLS,
+		TLSCertFile: *tlsCert,
+		TLSKeyFile:  *tlsKey,
 	}, log)
 	if err != nil {
 		if ctx.Err() != nil {

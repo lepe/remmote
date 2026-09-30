@@ -1,4 +1,4 @@
-package server
+package stream
 
 import (
 	"bufio"
@@ -36,7 +36,7 @@ func discardLogger() *slog.Logger {
 // back by -downscale like MouseMove, and reaches the surface resizer
 // only through the capture loop's channel.
 func TestResizeRequestReachesResizerOnCaptureLoop(t *testing.T) {
-	srv := &Server{
+	st := &Stream{
 		log:       discardLogger(),
 		opts:      Options{Downscale: 2},
 		resizer:   &fakeResizer{got: make(chan [2]int, 1)},
@@ -44,7 +44,7 @@ func TestResizeRequestReachesResizerOnCaptureLoop(t *testing.T) {
 	}
 	srvPeer, cliPeer := net.Pipe()
 	defer cliPeer.Close()
-	sess := &session{id: 1, srv: srv, conn: srvPeer, br: bufio.NewReader(srvPeer)}
+	sess := &session{id: 1, st: st, conn: srvPeer, br: bufio.NewReader(srvPeer)}
 	done := make(chan struct{})
 	go func() { defer close(done); sess.reader(context.Background()) }()
 
@@ -54,15 +54,15 @@ func TestResizeRequestReachesResizerOnCaptureLoop(t *testing.T) {
 	}
 	var p image.Point
 	select {
-	case p = <-srv.resizeReq:
+	case p = <-st.resizeReq:
 		if p.X != 1600 || p.Y != 1200 {
 			t.Fatalf("capture loop got %v, want 1600x1200 (800x600 × downscale 2)", p)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no resize request reached the capture loop")
 	}
-	srv.applyResize(p)
-	if got := <-srv.resizer.(*fakeResizer).got; got != [2]int{1600, 1200} {
+	st.applyResize(p)
+	if got := <-st.resizer.(*fakeResizer).got; got != [2]int{1600, 1200} {
 		t.Fatalf("resizer got %v, want 1600x1200", got)
 	}
 
@@ -73,14 +73,14 @@ func TestResizeRequestReachesResizerOnCaptureLoop(t *testing.T) {
 // Nonsense sizes from the wire are clamped, never passed on: a 1 px or
 // 65535 px request must not reach X.
 func TestResizeRequestIsClamped(t *testing.T) {
-	srv := &Server{log: discardLogger(), resizer: &fakeResizer{got: make(chan [2]int, 1)},
+	st := &Stream{log: discardLogger(), resizer: &fakeResizer{got: make(chan [2]int, 1)},
 		resizeReq: make(chan image.Point, 1)}
-	srv.requestResize(1, 1)
-	if p := <-srv.resizeReq; p.X != minResizePx || p.Y != minResizePx {
+	st.requestResize(1, 1)
+	if p := <-st.resizeReq; p.X != minResizePx || p.Y != minResizePx {
 		t.Fatalf("min clamp = %v, want %dpx", p, minResizePx)
 	}
-	srv.requestResize(60000, 60000)
-	if p := <-srv.resizeReq; p.X != maxResizePx || p.Y != maxResizePx {
+	st.requestResize(60000, 60000)
+	if p := <-st.resizeReq; p.X != maxResizePx || p.Y != maxResizePx {
 		t.Fatalf("max clamp = %v, want %dpx", p, maxResizePx)
 	}
 }
@@ -89,7 +89,7 @@ func TestResizeRequestIsClamped(t *testing.T) {
 // with exactly one warning, however many viewers keep asking.
 func TestDesktopResizeNeedsTheFlagAndWarnsOnce(t *testing.T) {
 	var logs bytes.Buffer
-	srv := &Server{
+	st := &Stream{
 		log:       slog.New(slog.NewTextHandler(&logs, nil)),
 		opts:      Options{},
 		desktop:   true,
@@ -97,10 +97,10 @@ func TestDesktopResizeNeedsTheFlagAndWarnsOnce(t *testing.T) {
 		resizeReq: make(chan image.Point, 1),
 	}
 	for i := 0; i < 3; i++ {
-		srv.requestResize(1024, 768)
+		st.requestResize(1024, 768)
 	}
 	select {
-	case p := <-srv.resizeReq:
+	case p := <-st.resizeReq:
 		t.Fatalf("resize reached the capture loop without -resize-desktop: %v", p)
 	default:
 	}
@@ -111,12 +111,12 @@ func TestDesktopResizeNeedsTheFlagAndWarnsOnce(t *testing.T) {
 
 // With the flag on, the same request is handed to the capture loop.
 func TestDesktopResizeWithFlagIsApplied(t *testing.T) {
-	srv := &Server{log: discardLogger(), opts: Options{ResizeDesktop: true}, desktop: true,
+	st := &Stream{log: discardLogger(), opts: Options{ResizeDesktop: true}, desktop: true,
 		resizer:   &fakeResizer{got: make(chan [2]int, 1)},
 		resizeReq: make(chan image.Point, 1)}
-	srv.requestResize(1024, 768)
+	st.requestResize(1024, 768)
 	select {
-	case p := <-srv.resizeReq:
+	case p := <-st.resizeReq:
 		if p.X != 1024 || p.Y != 768 {
 			t.Fatalf("capture loop got %v, want 1024x768", p)
 		}
@@ -128,16 +128,16 @@ func TestDesktopResizeWithFlagIsApplied(t *testing.T) {
 // The latest request replaces an older one still waiting: a drag
 // produces many sizes and only the last matters.
 func TestResizeRequestKeepsOnlyTheLatest(t *testing.T) {
-	srv := &Server{log: discardLogger(), resizer: &fakeResizer{got: make(chan [2]int, 1)},
+	st := &Stream{log: discardLogger(), resizer: &fakeResizer{got: make(chan [2]int, 1)},
 		resizeReq: make(chan image.Point, 1)}
-	srv.requestResize(800, 600)
-	srv.requestResize(900, 700)
-	srv.requestResize(1024, 768)
-	if p := <-srv.resizeReq; p.X != 1024 || p.Y != 768 {
+	st.requestResize(800, 600)
+	st.requestResize(900, 700)
+	st.requestResize(1024, 768)
+	if p := <-st.resizeReq; p.X != 1024 || p.Y != 768 {
 		t.Fatalf("kept %v, want only the newest 1024x768", p)
 	}
 	select {
-	case p := <-srv.resizeReq:
+	case p := <-st.resizeReq:
 		t.Fatalf("stale request survived: %v", p)
 	default:
 	}
@@ -145,11 +145,11 @@ func TestResizeRequestKeepsOnlyTheLatest(t *testing.T) {
 
 // An empty size never gets past decode, so nothing reaches the queue.
 func TestResizeMessageRejectsEmptySize(t *testing.T) {
-	srv := &Server{log: discardLogger(), resizer: &fakeResizer{got: make(chan [2]int, 1)},
+	st := &Stream{log: discardLogger(), resizer: &fakeResizer{got: make(chan [2]int, 1)},
 		resizeReq: make(chan image.Point, 1)}
 	srvPeer, cliPeer := net.Pipe()
 	defer cliPeer.Close()
-	sess := &session{id: 1, srv: srv, conn: srvPeer, br: bufio.NewReader(srvPeer)}
+	sess := &session{id: 1, st: st, conn: srvPeer, br: bufio.NewReader(srvPeer)}
 	done := make(chan struct{})
 	go func() { defer close(done); sess.reader(context.Background()) }()
 
@@ -159,7 +159,7 @@ func TestResizeMessageRejectsEmptySize(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 	select {
-	case p := <-srv.resizeReq:
+	case p := <-st.resizeReq:
 		t.Fatalf("empty resize reached the capture loop: %v", p)
 	default:
 	}

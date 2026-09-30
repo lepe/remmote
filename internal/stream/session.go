@@ -1,4 +1,4 @@
-package server
+package stream
 
 import (
 	"bufio"
@@ -35,7 +35,7 @@ const outboxCap = 2
 // them and the capture loop.
 type session struct {
 	id   uint64
-	srv  *Server
+	st   *Stream
 	conn net.Conn
 	br   *bufio.Reader // carries bytes buffered during the handshake
 	out  chan *frame
@@ -46,14 +46,14 @@ type session struct {
 	framesOut atomic.Uint64
 }
 
-func newSession(srv *Server, id uint64, conn net.Conn, br *bufio.Reader) *session {
+func newSession(st *Stream, id uint64, conn net.Conn, br *bufio.Reader) *session {
 	return &session{
 		id:   id,
-		srv:  srv,
+		st:   st,
 		conn: conn,
 		br:   br,
 		out:  make(chan *frame, outboxCap),
-		pump: newInputPump(srv.rt),
+		pump: newInputPump(st.rt),
 	}
 }
 
@@ -105,7 +105,7 @@ func (sess *session) reader(ctx context.Context) {
 		switch t {
 		case proto.MsgMouseMove:
 			if m, err := proto.DecodeMouseMove(payload); err == nil {
-				sess.pump.moveTo(int(m.X)*max(1, sess.srv.opts.Downscale), int(m.Y)*max(1, sess.srv.opts.Downscale))
+				sess.pump.moveTo(int(m.X)*max(1, sess.st.opts.Downscale), int(m.Y)*max(1, sess.st.opts.Downscale))
 			}
 		case proto.MsgMouseButton:
 			if m, err := proto.DecodeMouseButton(payload); err == nil {
@@ -121,27 +121,27 @@ func (sess *session) reader(ctx context.Context) {
 			}
 		case proto.MsgSetQuality:
 			if m, err := proto.DecodeSetQuality(payload); err == nil && m.Quality >= 1 && m.Quality <= 100 {
-				sess.srv.quality.Store(int32(m.Quality))
-				sess.srv.log.Info("quality changed", "quality", m.Quality, "client", sess.id)
+				sess.st.quality.Store(int32(m.Quality))
+				sess.st.log.Info("quality changed", "quality", m.Quality, "client", sess.id)
 			}
 		case proto.MsgResize:
 			// Stream coordinates, like MouseMove: the client divided by
 			// its -upscale, so multiply back by -downscale to land in
 			// host pixels.
 			if m, err := proto.DecodeResize(payload); err == nil {
-				f := max(1, sess.srv.opts.Downscale)
-				sess.srv.requestResize(int(m.Width)*f, int(m.Height)*f)
+				f := max(1, sess.st.opts.Downscale)
+				sess.st.requestResize(int(m.Width)*f, int(m.Height)*f)
 			}
 		case proto.MsgPong, proto.MsgPing:
 			// keepalive traffic; the read deadline is fed
 		case proto.MsgClipboard:
-			if m, err := proto.DecodeClipboard(payload); err == nil && sess.srv.clip != nil {
-				sess.srv.clip.SetRemote(m.Text)
+			if m, err := proto.DecodeClipboard(payload); err == nil && sess.st.clip != nil {
+				sess.st.clip.SetRemote(m.Text)
 			}
 		case proto.MsgClose:
 			return
 		default:
-			sess.srv.log.Warn("unexpected message from client; dropping connection",
+			sess.st.log.Warn("unexpected message from client; dropping connection",
 				"type", t.String(), "client", sess.id)
 			return
 		}
@@ -162,14 +162,14 @@ func (sess *session) writer(ctx context.Context) {
 			_ = sess.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := proto.WriteMsg(bw, f.typ, f.flags, f.payload); err != nil {
 				if ctx.Err() == nil {
-					sess.srv.log.Warn("client write failed (slow client?)", "client", sess.id, "err", err)
+					sess.st.log.Warn("client write failed (slow client?)", "client", sess.id, "err", err)
 				}
 				sess.conn.Close()
 				return
 			}
 			if err := bw.Flush(); err != nil {
 				if ctx.Err() == nil {
-					sess.srv.log.Warn("client flush failed", "client", sess.id, "err", err)
+					sess.st.log.Warn("client flush failed", "client", sess.id, "err", err)
 				}
 				sess.conn.Close()
 				return

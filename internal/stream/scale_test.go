@@ -1,4 +1,4 @@
-package server
+package stream
 
 import (
 	"github.com/lepe/remmote/internal/encode"
