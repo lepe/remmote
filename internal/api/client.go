@@ -13,16 +13,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lepe/remmote/internal/auth"
 	"github.com/lepe/remmote/internal/tlsutil"
 )
 
 // Control API paths.
 const (
-	PathHost    = "/api/v1/host"
-	PathSession = "/api/v1/session"
-	PathEvents  = "/api/v1/events"
-	PathAttach  = "/api/v1/attach"
-	PathPair    = "/api/v1/pair"
+	PathHost      = "/api/v1/host"
+	PathSession   = "/api/v1/session"
+	PathEvents    = "/api/v1/events"
+	PathAttach    = "/api/v1/attach"
+	PathPair      = "/api/v1/pair"
+	PathPairCodes = "/api/v1/pair-codes"
+	PathClients   = "/api/v1/clients"
+	PathClient    = "/api/v1/clients/{name}" // daemon route; a client addresses one by name
 )
 
 // Client talks to one daemon's control API.
@@ -42,6 +46,17 @@ func NewClient(addr string, cfg *tls.Config) *Client {
 	}
 	return &Client{addr: addr, base: scheme + "://" + addr, cfg: cfg,
 		hc: &http.Client{Transport: tr}}
+}
+
+// NewClientIdentity builds a control client that authenticates as a
+// paired device: its certificate says who it is, and the CA it carries
+// says which daemon it is talking to.
+func NewClientIdentity(addr string, id *auth.Identity) (*Client, error) {
+	cfg, err := id.TLSConfig(addr)
+	if err != nil {
+		return nil, err
+	}
+	return NewClient(addr, cfg), nil
 }
 
 // Host asks the daemon what it can do.
@@ -157,6 +172,69 @@ func (c *Client) Events(ctx context.Context) (<-chan Event, func(), error) {
 		}
 	}()
 	return ch, func() { resp.Body.Close() }, nil
+}
+
+// Pair exchanges a pairing code for this device's certificate. The key
+// is what NewIdentity generated and what never leaves this machine; the
+// result is the identity to save and present from then on.
+func (c *Client) Pair(ctx context.Context, code, name string, keyPEM, csrPEM []byte) (*auth.Identity, error) {
+	body, err := json.Marshal(PairRequest{Code: code, Name: name, CSR: string(csrPEM)})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(ctx, http.MethodPost, PathPair, body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var pr PairResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
+	return &auth.Identity{Name: name, Role: pr.Role,
+		Key: keyPEM, Cert: []byte(pr.Cert), CA: []byte(pr.CA)}, nil
+}
+
+// PairCode mints an invitation to a role (admin).
+func (c *Client) PairCode(ctx context.Context, role, ttl string) (*PairCodeResponse, error) {
+	body, err := json.Marshal(PairCodeRequest{Role: role, TTL: ttl})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(ctx, http.MethodPost, PathPairCodes, body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var pr PairCodeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
+	return &pr, nil
+}
+
+// Clients lists the paired devices (admin).
+func (c *Client) Clients(ctx context.Context) ([]ClientInfo, error) {
+	resp, err := c.do(ctx, http.MethodGet, PathClients, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var list []ClientInfo
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
+	return list, nil
+}
+
+// Revoke withdraws one device's admission (admin).
+func (c *Client) Revoke(ctx context.Context, name string) error {
+	resp, err := c.do(ctx, http.MethodDelete, PathClients+"/"+name, nil)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
 }
 
 // Attach dials the daemon and upgrades the connection to the binary

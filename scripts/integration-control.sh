@@ -39,6 +39,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# has <text> <pattern>: substring match without a pipe. A piped grep -q
+# exits as soon as it matches, the writer dies on SIGPIPE, and pipefail
+# turns that into a failure — a check that lies about its own result.
+has() {
+	case "$1" in
+	*"$2"*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
 command -v Xvfb >/dev/null 2>&1 || { echo "SKIP: no Xvfb"; exit 77; }
 
 echo "== building"
@@ -113,7 +123,7 @@ ctl start -spec "$SPEC/desktop.json" -wait || {
 	ctl session || true
 	exit 1
 }
-ctl session | grep -q '"state": "live"' || { echo "FAIL: the session is not live"; exit 1; }
+has "$(ctl session)" '"state": "live"' || { echo "FAIL: the session is not live"; exit 1; }
 
 echo "== viewer 1 attaches"
 rm -f "$SNAP"
@@ -121,7 +131,7 @@ rm -f "$SNAP"
 go run ./internal/testfill -check "$SNAP" -expect "$COLOR"
 
 echo "== the session outlived its viewer (detach is not terminate)"
-ctl session | grep -q '"state": "live"' || {
+has "$(ctl session)" '"state": "live"' || {
 	echo "FAIL: closing the viewer ended the session"
 	exit 1
 }
@@ -150,8 +160,8 @@ ctl start -spec "$SPEC/replaced.json" -replace -wait || {
 	exit 1
 }
 SESSION=$(ctl session)
-echo "$SESSION" | grep -q '"state": "live"' || { echo "FAIL: the replacement is not live"; exit 1; }
-echo "$SESSION" | grep -q '"codec": "zraw"' || {
+has "$SESSION" '"state": "live"' || { echo "FAIL: the replacement is not live"; exit 1; }
+has "$SESSION" '"codec": "zraw"' || {
 	echo "FAIL: the replacement spec is not the one in force"
 	echo "$SESSION"
 	exit 1

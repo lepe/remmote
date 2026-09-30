@@ -283,6 +283,9 @@ keyframe (2 s).
 | `-listen` | `:7677` | TCP listen address — the control API and the streams share it |
 | `-idle` | off | share nothing at startup; wait for a client to say what to share |
 | `-allow-exec` | — | comma-separated commands clients may launch (`source: app`); empty refuses them all. A session started from these flags is never restricted |
+| `-auth` | off | admit only **paired devices** — each named, roled and revocable — with its own TLS (the authority signs the daemon's certificate too) |
+| `-auth-dir` | `~/.config/remmote/daemon` | with `-auth`: where the authority, its roster and the current pairing code live |
+| `-insecure` | off | allow an unencrypted listener that is not loopback-only (never on a shared network) |
 | `-fps` | `60` | max frames/s (also the damage merge window) |
 | `-codec` | `hybrid` | `hybrid`, `zraw`, `jpeg` or `webp` (webp needs a `-tags webp` build) |
 | `-downscale` | `1` | divide stream width/height by 2 or 4 to reduce encoded pixels 4× or 16×; mouse coordinates are mapped back automatically |
@@ -536,12 +539,57 @@ Control is JSON over HTTP/1.1 on the same port as the stream (HTTPS with
 | `DELETE /api/v1/session` | terminate the session **and** the service |
 | `GET /api/v1/events` | SSE: state changes and log lines as the session starts and runs |
 | `POST /api/v1/attach` | `Upgrade: remmote` → `101 Switching Protocols`, then the raw stream below |
+| `POST /api/v1/pair` | exchange a pairing code for a device certificate (the only call an unpaired device may make) |
+| `POST /api/v1/pair-codes` | mint a pairing code for a role (admin) |
+| `GET /api/v1/clients` | the roster of paired devices (admin) |
+| `DELETE /api/v1/clients/{name}` | revoke one device (admin) |
 
 A session is `starting`, `live` or `lost` (a session that failed to
 start keeps its error and log until replaced). `attach` waits for a
 session that is still starting rather than making every viewer time and
 retry — and it is what makes *detach* trivial: closing the viewer closes
 its connection, and the session carries on.
+
+### Authentication: paired devices
+
+`-tls` says the link is private; it does not say **who** is on it. With
+`-tls <secret>` everyone holding the secret is the same person, and
+losing it means changing it everywhere. `-auth` is the other thing: the
+daemon keeps a small certificate authority and admits only the devices
+it has paired with — each with a key that never left its machine, a
+name, a role, and a revocation that applies to it alone.
+
+```sh
+# the daemon prints (and files) a pairing code at startup
+./bin/remmote-server -idle -listen :7677 -auth
+
+# the new device, with the code the operator passed on:
+./bin/remmote-ctl -server host:7677 pair -name laptop -code 4F2A9C31
+
+# and from then on it says who it is:
+./bin/remmote-ctl -identity laptop -server host:7677 session
+./bin/remmote-client -identity laptop -server host:7677
+```
+
+A paired device verifies the daemon against the authority it was given
+at pairing — so it knows *which* daemon it reached, not merely that
+something answered. The roles are what make this worth it:
+
+| Role | May do |
+|---|---|
+| `view` | watch a session, attach the stream |
+| `control` | also start, replace and terminate sessions |
+| `admin` | also pair and revoke devices |
+
+The first device paired is an `admin` (the pairing code says so); a
+device for someone who only watches is paired `view` (`remmote-ctl
+-identity laptop pair-code -role view`). Revoking is one call:
+`remmote-ctl -identity laptop revoke -name old-laptop`. Every session
+change, attach and pairing decision is logged with the device that asked
+for it.
+
+A listener that is not loopback-only refuses to run without TLS at all —
+and `-insecure` is for the one case where that is really yours.
 
 ## Wire protocol (v4)
 

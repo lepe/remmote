@@ -140,6 +140,45 @@ type Event struct {
 	Time  time.Time `json:"time,omitempty"`
 }
 
+// PairRequest pairs a device: the pairing code the operator passed on,
+// the name to pair it under, and the signing request its own key made
+// (so its private key never travels).
+type PairRequest struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
+	CSR  string `json:"csr"` // PEM certificate signing request
+}
+
+// PairResponse is what a freshly paired device keeps: its certificate,
+// and the CA it verifies the daemon against.
+type PairResponse struct {
+	Cert string `json:"cert"` // PEM
+	CA   string `json:"ca"`   // PEM
+	Role string `json:"role"`
+}
+
+// PairCodeRequest mints an invitation to a role — an admin pairing a
+// device as view or control without handing out more admin codes.
+type PairCodeRequest struct {
+	Role string `json:"role"`
+	TTL  string `json:"ttl,omitempty"` // Go duration; default 10m
+}
+
+// PairCodeResponse is a single-use pairing code and when it dies.
+type PairCodeResponse struct {
+	Code    string    `json:"code"`
+	Role    string    `json:"role"`
+	Expires time.Time `json:"expires"`
+}
+
+// ClientInfo is a paired device as the daemon lists it.
+type ClientInfo struct {
+	Name     string    `json:"name"`
+	Role     string    `json:"role"`
+	PairedAt time.Time `json:"pairedAt"`
+	Revoked  bool      `json:"revoked,omitempty"`
+}
+
 // Error is a control API failure: the daemon's message and its status.
 type Error struct {
 	Status  int

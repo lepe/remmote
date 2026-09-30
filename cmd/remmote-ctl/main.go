@@ -26,8 +26,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/lepe/remmote/internal/api"
+	"github.com/lepe/remmote/internal/auth"
 	"github.com/lepe/remmote/internal/tlsutil"
 )
 
@@ -35,6 +37,7 @@ func main() {
 	global := flag.NewFlagSet("remmote-ctl", flag.ExitOnError)
 	server := global.String("server", "127.0.0.1:7677", "daemon address host:port")
 	useTLS := global.String("tls", "off", "encryption: 'auto' (or no value), the daemon's shared secret, or SHA256:… to pin its certificate")
+	identity := global.String("identity", "", "authenticate as this paired device (its credential lives in ~/.config/remmote/credentials/<name>)")
 	global.Usage = usage
 	// -tls takes an optional value; reshape the arguments first.
 	global.Parse(tlsutil.NormalizeArgs(os.Args[1:]))
@@ -51,6 +54,10 @@ func main() {
 	replace := sub.Bool("replace", false, "stop the running session first (terminate and start mine)")
 	waitLive := sub.Bool("wait", false, "follow the session until it is live (or has failed)")
 	follow := sub.Bool("follow", false, "stay attached until interrupted")
+	pairCode := sub.String("code", "", "the pairing code the operator passed on (pair)")
+	pairName := sub.String("name", "", "what to call this device (pair)")
+	pairRole := sub.String("role", "view", "role to pair the device into: view, control or admin (pair-code)")
+	pairTTL := sub.String("ttl", "", "how long the pairing code lives, e.g. 10m (pair-code)")
 	sub.Usage = usage
 	sub.Parse(rest)
 	if sub.NArg() != 0 {
@@ -58,14 +65,13 @@ func main() {
 		os.Exit(2)
 	}
 
-	cfg, err := clientTLS(*useTLS)
+	c, err := clientFor(*server, *useTLS, *identity)
 	if err != nil {
 		fatal(err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	c := api.NewClient(*server, cfg)
 	switch cmd {
 	case "host":
 		h, err := c.Host(ctx)
@@ -138,6 +144,62 @@ func main() {
 		}
 		fmt.Println("terminated: the session is gone and the daemon has stopped")
 
+	case "pair":
+		if *pairName == "" || *pairCode == "" {
+			fatal(fmt.Errorf("pair needs -name <device> and -code <pairing code>"))
+		}
+		// The key is generated here and never sent: the daemon signs a
+		// request for the matching public key.
+		keyPEM, csrPEM, err := auth.NewIdentity(*pairName)
+		if err != nil {
+			fatal(err)
+		}
+		id, err := c.Pair(ctx, *pairCode, *pairName, keyPEM, csrPEM)
+		if err != nil {
+			fatal(err)
+		}
+		dir := auth.DefaultIdentityDir(*pairName)
+		if err := id.Save(dir); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("paired %q as %s\n", *pairName, id.Role)
+		fmt.Println("credential:", dir)
+
+	case "pair-code":
+		resp, err := c.PairCode(ctx, *pairRole, *pairTTL)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("pairing code for %s: %s\n", resp.Role, resp.Code)
+		fmt.Println("expires:", resp.Expires.Format(time.RFC3339))
+
+	case "clients":
+		list, err := c.Clients(ctx)
+		if err != nil {
+			fatal(err)
+		}
+		if len(list) == 0 {
+			fmt.Println("no devices are paired")
+			return
+		}
+		for _, cl := range list {
+			state := "paired"
+			if cl.Revoked {
+				state = "REVOKED"
+			}
+			fmt.Printf("%-16s %-8s %s  %s\n", cl.Name, cl.Role, state,
+				cl.PairedAt.Format("2006-01-02 15:04"))
+		}
+
+	case "revoke":
+		if *pairName == "" {
+			fatal(fmt.Errorf("revoke needs -name <device>"))
+		}
+		if err := c.Revoke(ctx, *pairName); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("revoked %q: it can no longer connect\n", *pairName)
+
 	default:
 		fmt.Fprintf(os.Stderr, "remmote-ctl: unknown command %q\n", cmd)
 		usage()
@@ -171,8 +233,13 @@ func waitSession(ctx context.Context, events <-chan api.Event, c *api.Client) in
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: remmote-ctl [-server host:port] [-tls value] <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: host | session | start [-spec file|-] [-wait] [-replace] | events [-follow] | terminate")
+	fmt.Fprintln(os.Stderr, "usage: remmote-ctl [-server host:port] [-tls value] [-identity name] <command> [flags]")
+	fmt.Fprintln(os.Stderr, "commands:")
+	fmt.Fprintln(os.Stderr, "  host | session | events [-follow] | terminate")
+	fmt.Fprintln(os.Stderr, "  start [-spec file|-] [-wait] [-replace]")
+	fmt.Fprintln(os.Stderr, "  pair -name <device> -code <code>")
+	fmt.Fprintln(os.Stderr, "  pair-code -role view|control|admin [-ttl 10m]   (admin)")
+	fmt.Fprintln(os.Stderr, "  clients | revoke -name <device>                 (admin)")
 }
 
 // readSpec reads a SessionSpec from a JSON file, or stdin with "-".
@@ -192,6 +259,23 @@ func readSpec(path string) (api.SessionSpec, error) {
 		return spec, fmt.Errorf("bad session spec: %w", err)
 	}
 	return spec, nil
+}
+
+// clientFor builds the control client: as a paired device when an
+// identity is named, and with -tls otherwise (plain on loopback).
+func clientFor(server, tlsValue, identity string) (*api.Client, error) {
+	if identity != "" {
+		id, err := auth.LoadIdentity(auth.DefaultIdentityDir(identity))
+		if err != nil {
+			return nil, err
+		}
+		return api.NewClientIdentity(server, id)
+	}
+	cfg, err := clientTLS(tlsValue)
+	if err != nil {
+		return nil, err
+	}
+	return api.NewClient(server, cfg), nil
 }
 
 // clientTLS turns a -tls value into a client config (nil = plaintext).

@@ -10,7 +10,9 @@ Type=simple
 User=lepe
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/lepe/.Xauthority
-ExecStart=/usr/local/bin/remmote-server -display :0 -listen :7677
+# -auth admits only paired devices (remmote-ctl pair -code …): without it
+# the listener must be TLS-only or loopback-only, and this is neither.
+ExecStart=/usr/local/bin/remmote-server -display :0 -listen :7677 -auth
 Restart=on-failure
 RestartSec=2
 

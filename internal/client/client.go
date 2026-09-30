@@ -43,6 +43,9 @@ type Options struct {
 	NoClipboard   bool          // disable clipboard synchronization
 	TLS           bool          // encrypt the stream
 	TLSValue      string        // the -tls argument: default mode, a fingerprint, or a shared secret
+	// TLSConfig is the TLS configuration to use as it stands (a paired
+	// device's identity). When set, TLS and TLSValue say nothing.
+	TLSConfig *tls.Config
 }
 
 // Run drives the client until the window closes or ctx is canceled.
@@ -581,15 +584,19 @@ func dial(ctx context.Context, opts Options, log *slog.Logger, attempt int) (net
 	// daemon answers the attach as soon as the session is live.
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	unverified := false
-	if opts.TLS {
-		cfg, err := tlsutil.ClientConfig(opts.TLSValue)
+	cfg := opts.TLSConfig
+	if cfg == nil && opts.TLS {
+		var err error
+		cfg, err = tlsutil.ClientConfig(opts.TLSValue)
 		if err != nil {
 			conn.Close()
 			return nil, nil, err
 		}
+	}
+	if cfg != nil {
 		// A configuration with no verification callback accepted whatever
 		// certificate arrived; say so rather than let it look verified.
-		unverified = cfg.VerifyPeerCertificate == nil
+		unverified = cfg.VerifyPeerCertificate == nil && cfg.RootCAs == nil
 		tconn := tls.Client(conn, cfg)
 		if err := tconn.HandshakeContext(ctx); err != nil {
 			conn.Close()

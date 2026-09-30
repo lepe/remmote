@@ -35,6 +35,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# has <text> <pattern>: substring match without a pipe. A piped grep -q
+# exits as soon as it matches, the writer dies on SIGPIPE, and pipefail
+# turns that into a failure — a check that lies about its own result.
+has() {
+	case "$1" in
+	*"$2"*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
 command -v Xvfb >/dev/null 2>&1 || { echo "SKIP: no Xvfb"; exit 77; }
 
 echo "== building"
@@ -89,8 +99,8 @@ for _ in $(seq 1 50); do
 done
 [ -n "$UP" ] || { echo "FAIL: daemon never answered"; grep -v authority "$LOG" | tail -5; exit 1; }
 HOST=$(ctl host)
-echo "$HOST" | grep -q '"canCreate": true' || { echo "FAIL: host cannot create displays"; echo "$HOST"; exit 1; }
-echo "$HOST" | grep -q '"allowExec": true' || { echo "FAIL: host does not report its exec allowance"; echo "$HOST"; exit 1; }
+has "$HOST" '"canCreate": true' || { echo "FAIL: host cannot create displays"; echo "$HOST"; exit 1; }
+has "$HOST" '"allowExec": true' || { echo "FAIL: host does not report its exec allowance"; echo "$HOST"; exit 1; }
 
 echo "== a window manager that is not installed is refused by name"
 if ctl start -spec "$SPEC/badwm.json" >"$SPEC/out" 2>&1; then
@@ -108,7 +118,7 @@ ctl start -spec "$SPEC/app.json" -wait || {
 	exit 1
 }
 SESSION=$(ctl session)
-echo "$SESSION" | grep -q '"state": "live"' || { echo "FAIL: the session is not live"; echo "$SESSION"; exit 1; }
+has "$SESSION" '"state": "live"' || { echo "FAIL: the session is not live"; echo "$SESSION"; exit 1; }
 NUM=$(session_display)
 [ -n "$NUM" ] || { echo "FAIL: the session does not name its display"; echo "$SESSION"; exit 1; }
 echo "   display :$NUM created"
@@ -137,7 +147,7 @@ ctl start -spec "$SPEC/desktop.json" -replace -wait || {
 	exit 1
 }
 SESSION=$(ctl session)
-echo "$SESSION" | grep -q '"state": "live"' || { echo "FAIL: the replacement is not live"; echo "$SESSION"; exit 1; }
+has "$SESSION" '"state": "live"' || { echo "FAIL: the replacement is not live"; echo "$SESSION"; exit 1; }
 NEWNUM=$(session_display)
 echo "   display :$NEWNUM created"
 if kill -0 "$APP_PID" 2>/dev/null; then
@@ -155,8 +165,8 @@ if [ ! -S "/tmp/.X11-unix/X$NEWNUM" ]; then
 fi
 
 echo "== the created display is the size that was asked for"
-echo "$SESSION" | grep -q '"width": 640' || { echo "FAIL: 640x480 was not honoured"; echo "$SESSION"; exit 1; }
-echo "$SESSION" | grep -q '"height": 480' || { echo "FAIL: 640x480 was not honoured"; echo "$SESSION"; exit 1; }
+has "$SESSION" '"width": 640' || { echo "FAIL: 640x480 was not honoured"; echo "$SESSION"; exit 1; }
+has "$SESSION" '"height": 480' || { echo "FAIL: 640x480 was not honoured"; echo "$SESSION"; exit 1; }
 
 echo "== terminate: display gone, service gone"
 ctl terminate

@@ -13,11 +13,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/lepe/remmote/internal/api"
+	"github.com/lepe/remmote/internal/auth"
 	"github.com/lepe/remmote/internal/daemon"
 	"github.com/lepe/remmote/internal/stream"
 	"github.com/lepe/remmote/internal/tlsutil"
@@ -42,6 +44,9 @@ func main() {
 		resizeDesk  = flag.Bool("resize-desktop", false, "whole-desktop mode: let a viewer resizing its window resize the host screen too (best effort via RANDR)")
 		idle        = flag.Bool("idle", false, "share nothing at startup; wait for a client to say what to share")
 		allowExec   = flag.String("allow-exec", "", "comma-separated commands clients may launch (source app); empty refuses them all")
+		useAuth     = flag.Bool("auth", false, "admit only paired devices — each named, roled and revocable; brings its own TLS")
+		authDir     = flag.String("auth-dir", "", "with -auth: where the authority and its roster live (default ~/.config/remmote/daemon)")
+		insecure    = flag.Bool("insecure", false, "allow an unencrypted listener that is not loopback-only (never on a shared network)")
 		useTLS      = flag.String("tls", "off", "encrypt the listener: 'auto' (or no value) to generate and print a certificate fingerprint, a shared secret both sides pass, or SHA256:… to assert the -tls-cert certificate")
 		tlsCert     = flag.String("tls-cert", "", "with -tls: PEM certificate to use (default: generate and cache one)")
 		tlsKey      = flag.String("tls-key", "", "with -tls: PEM private key to use (default: generate and cache one)")
@@ -60,6 +65,18 @@ func main() {
 	}
 	if !tlsutil.On(*useTLS) && (*tlsCert != "" || *tlsKey != "") {
 		log.Error("-tls-cert/-tls-key require -tls")
+		os.Exit(2)
+	}
+	if *useAuth && tlsutil.On(*useTLS) {
+		log.Error("-auth brings its own TLS (the authority signs the daemon's certificate); drop -tls")
+		os.Exit(2)
+	}
+	authPath := *authDir
+	if authPath == "" {
+		authPath = filepath.Join(auth.ConfigHome(), "daemon")
+	}
+	if *useAuth && authPath == "" {
+		log.Error("-auth needs a directory for the authority (-auth-dir)")
 		os.Exit(2)
 	}
 	if *idle && (*dumpFrame == "" && !*testInj) {
@@ -146,7 +163,11 @@ func main() {
 		TLSCertFile: *tlsCert,
 		TLSKeyFile:  *tlsKey,
 		AllowExec:   splitList(*allowExec),
+		Insecure:    *insecure,
 		Log:         log,
+	}
+	if *useAuth {
+		dopts.AuthDir = authPath
 	}
 	if !*idle {
 		dopts.Initial = &spec

@@ -19,12 +19,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/lepe/remmote/internal/api"
+	"github.com/lepe/remmote/internal/auth"
 	"github.com/lepe/remmote/internal/hostenv"
 	"github.com/lepe/remmote/internal/proto"
 	"github.com/lepe/remmote/internal/stream"
@@ -50,6 +52,17 @@ type Options struct {
 	// decision. A session started from Initial is never restricted.
 	AllowExec []string
 
+	// AuthDir turns on paired-device admission: a small certificate
+	// authority lives here, and only devices it has signed certificates
+	// for get in — each named, roled and revocable on its own. It brings
+	// its own TLS (the CA signs the daemon's certificate too), so -tls
+	// has nothing to add alongside it.
+	AuthDir string
+
+	// Insecure allows an unencrypted listener that is not loopback-only.
+	// The refusal without it is the whole point: this port is the machine.
+	Insecure bool
+
 	Log *slog.Logger
 }
 
@@ -59,6 +72,7 @@ type Daemon struct {
 	opts Options
 	log  *slog.Logger
 	ring *logRing
+	auth *auth.Authority // nil when devices are not paired
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -94,7 +108,15 @@ func New(opts Options) (*Daemon, error) {
 	if opts.Log == nil {
 		opts.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Daemon{opts: opts, log: opts.Log, ring: newLogRing(200)}, nil
+	d := &Daemon{opts: opts, log: opts.Log, ring: newLogRing(200)}
+	if opts.AuthDir != "" {
+		a, err := auth.Load(opts.AuthDir)
+		if err != nil {
+			return nil, err
+		}
+		d.auth = a
+	}
+	return d, nil
 }
 
 // Run serves until ctx is canceled or the session is terminated, then
@@ -114,7 +136,36 @@ func (d *Daemon) Run(ctx context.Context) error {
 		Handler:  d.mux(),
 		ErrorLog: log.New(&slogWriter{d.log}, "", 0),
 	}
-	if d.opts.TLS {
+
+	// A listener that is not loopback-only needs a door: without TLS,
+	// anyone who can reach this port runs this machine. -insecure is for
+	// a development setup and says so out loud.
+	if !d.opts.TLS && d.auth == nil && !d.opts.Insecure && !isLoopback(d.opts.ListenAddr) {
+		_ = ln.Close()
+		return fmt.Errorf("daemon: refusing to serve %s without TLS: anyone who can reach it would gain full control of this machine (pass -tls, or -insecure if the network really is yours)",
+			d.opts.ListenAddr)
+	}
+
+	switch {
+	case d.auth != nil:
+		// Paired devices: the authority signs both ends of the link, so
+		// the daemon knows which device is asking and the device knows
+		// which daemon it reached.
+		serverCert, err := d.auth.ServerCert(serverCertHosts())
+		if err != nil {
+			_ = ln.Close()
+			return err
+		}
+		cfg, err := d.auth.TLSConfig(serverCert)
+		if err != nil {
+			_ = ln.Close()
+			return err
+		}
+		srv.TLSConfig = cfg
+		d.log.Warn("TLS: encrypted, and only paired devices are admitted — each named, roled and revocable on its own",
+			"listen", d.opts.ListenAddr, "authority", d.auth.Fingerprint())
+		d.startPairing()
+	case d.opts.TLS:
 		cfg, err := tlsutil.ServerConfig(d.opts.TLSCertFile, d.opts.TLSKeyFile, d.opts.TLSValue)
 		if err != nil {
 			_ = ln.Close()
@@ -137,7 +188,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				"listen", d.opts.ListenAddr, "fingerprint", fingerprint)
 		}
 		srv.TLSConfig = cfg
-	} else {
+	default:
 		d.log.Warn("NO AUTHENTICATION, NO ENCRYPTION: anyone who can reach this port gains full control of this machine",
 			"listen", d.opts.ListenAddr)
 	}
@@ -148,7 +199,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	serveDone := make(chan struct{})
 	go func() {
 		defer close(serveDone)
-		if d.opts.TLS {
+		if srv.TLSConfig != nil {
 			_ = srv.ServeTLS(ln, "", "")
 		} else {
 			_ = srv.Serve(ln)
@@ -180,10 +231,194 @@ func (d *Daemon) mux() *http.ServeMux {
 	mux.HandleFunc("DELETE "+api.PathSession, d.handleSessionDelete)
 	mux.HandleFunc("GET "+api.PathEvents, d.handleEvents)
 	mux.HandleFunc("POST "+api.PathAttach, d.handleAttach)
+	mux.HandleFunc("POST "+api.PathPair, d.handlePair)
+	mux.HandleFunc("POST "+api.PathPairCodes, d.handlePairCode)
+	mux.HandleFunc("GET "+api.PathClients, d.handleClients)
+	mux.HandleFunc("DELETE "+api.PathClient, d.handleClientDelete)
 	return mux
 }
 
+// startPairing mints the code that pairs the first device, and keeps it
+// where the operator can find it: in the log, and in the authority's
+// directory. The CA's private key sits in the same directory, so this is
+// not a weaker secret than the one it is next to.
+func (d *Daemon) startPairing() {
+	code, err := d.auth.NewPairingCode(auth.RoleAdmin, 0)
+	if err != nil {
+		d.log.Warn("could not mint a pairing code", "err", err)
+		return
+	}
+	_ = os.WriteFile(filepath.Join(d.opts.AuthDir, "pairing-code"), []byte(code+"\n"), 0o600)
+	d.log.Info("pair a device with: remmote-ctl pair -code "+code+" -name <device>",
+		"role", auth.RoleAdmin, "file", filepath.Join(d.opts.AuthDir, "pairing-code"))
+}
+
+// handlePair admits a device: a pairing code, a name, and a signing
+// request whose private key never left that device. The only call here
+// that a device without a certificate may make.
+func (d *Daemon) handlePair(w http.ResponseWriter, r *http.Request) {
+	if d.auth == nil {
+		apiError(w, http.StatusNotFound, "this daemon does not pair devices")
+		return
+	}
+	var req api.PairRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		apiError(w, http.StatusBadRequest, "bad pairing request: %v", err)
+		return
+	}
+	certPEM, role, err := d.auth.Pair(req.Code, req.Name, []byte(req.CSR))
+	if err != nil {
+		d.log.Warn("pairing refused", "remote", r.RemoteAddr, "name", req.Name, "err", err)
+		apiError(w, http.StatusForbidden, "%v", err)
+		return
+	}
+	d.log.Info("device paired", "name", req.Name, "role", role, "remote", r.RemoteAddr)
+	writeJSON(w, http.StatusOK, api.PairResponse{
+		Cert: string(certPEM),
+		CA:   string(d.auth.CACertPEM()),
+		Role: role,
+	})
+}
+
+// handlePairCode mints an invitation to a role.
+func (d *Daemon) handlePairCode(w http.ResponseWriter, r *http.Request) {
+	if !d.require(w, r, auth.RoleAdmin) {
+		return
+	}
+	var req api.PairCodeRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		apiError(w, http.StatusBadRequest, "bad request: %v", err)
+		return
+	}
+	var ttl time.Duration
+	if req.TTL != "" {
+		parsed, err := time.ParseDuration(req.TTL)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, "ttl %q is not a duration", req.TTL)
+			return
+		}
+		ttl = parsed
+	}
+	code, err := d.auth.NewPairingCode(req.Role, ttl)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	d.audit(r, "pair-code")
+	writeJSON(w, http.StatusOK, api.PairCodeResponse{Code: code, Role: req.Role,
+		Expires: time.Now().Add(ttlOrDefault(ttl))})
+}
+
+// handleClients lists the paired devices.
+func (d *Daemon) handleClients(w http.ResponseWriter, r *http.Request) {
+	if !d.require(w, r, auth.RoleAdmin) {
+		return
+	}
+	list := d.auth.Clients()
+	out := make([]api.ClientInfo, 0, len(list))
+	for _, c := range list {
+		out = append(out, api.ClientInfo{Name: c.Name, Role: c.Role,
+			PairedAt: c.PairedAt, Revoked: c.Revoked})
+	}
+	d.audit(r, "clients")
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleClientDelete revokes one device.
+func (d *Daemon) handleClientDelete(w http.ResponseWriter, r *http.Request) {
+	if !d.require(w, r, auth.RoleAdmin) {
+		return
+	}
+	name := r.PathValue("name")
+	if err := d.auth.Revoke(name); err != nil {
+		apiError(w, http.StatusNotFound, "%v", err)
+		return
+	}
+	d.log.Info("device revoked", "name", name)
+	d.audit(r, "revoke "+name)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// who reports the device behind a request: its name and role, or
+// nothing when the link carries no identity (no pairing in use).
+func (d *Daemon) who(r *http.Request) (name, role string) {
+	if d.auth == nil || r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return "", ""
+	}
+	cert := r.TLS.PeerCertificates[0]
+	role, ok := d.auth.RoleOf(cert)
+	if !ok {
+		return cert.Subject.CommonName, ""
+	}
+	return cert.Subject.CommonName, role
+}
+
+// require checks that the device behind the request may do what needs
+// want, answering 403 when it may not. With no pairing in use nothing is
+// restricted — and the banner at startup says exactly what that means.
+func (d *Daemon) require(w http.ResponseWriter, r *http.Request, want string) bool {
+	if d.auth == nil {
+		return true
+	}
+	name, role := d.who(r)
+	if role == "" {
+		apiError(w, http.StatusForbidden,
+			"this daemon only admits paired devices (remmote-ctl pair -code …)")
+		return false
+	}
+	if !auth.AtLeast(role, want) {
+		apiError(w, http.StatusForbidden,
+			"device %q (%s) may not do this; it needs %s", name, role, want)
+		return false
+	}
+	return true
+}
+
+// audit records who did what. A daemon that can start displays and run
+// programs is worth a paper trail.
+func (d *Daemon) audit(r *http.Request, op string) {
+	name, role := d.who(r)
+	d.log.Info("api", "op", op, "client", name, "role", role, "remote", r.RemoteAddr)
+}
+
+// serverCertHosts are the names and addresses the daemon's certificate
+// answers for: this machine, by name and by loopback address.
+func serverCertHosts() []string {
+	hosts := []string{"localhost", "127.0.0.1", "::1"}
+	if h, err := os.Hostname(); err == nil {
+		hosts = append(hosts, h)
+	}
+	return hosts
+}
+
+// isLoopback reports whether an address only listens on this machine.
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "" { // ":7677" means every interface
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// ttlOrDefault is how long a pairing code lives when none was asked for.
+func ttlOrDefault(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return 10 * time.Minute
+	}
+	return ttl
+}
+
 func (d *Daemon) handleHost(w http.ResponseWriter, r *http.Request) {
+	if !d.require(w, r, auth.RoleView) {
+		return
+	}
 	h := api.HostInfo{
 		ProtoVersion:   int(proto.ProtoVersion),
 		Codecs:         api.Codecs(),
@@ -202,6 +437,9 @@ func (d *Daemon) handleHost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleSessionGet(w http.ResponseWriter, r *http.Request) {
+	if !d.require(w, r, auth.RoleView) {
+		return
+	}
 	d.mu.Lock()
 	s := d.sess
 	var info api.SessionInfo
@@ -217,6 +455,9 @@ func (d *Daemon) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleSessionPost(w http.ResponseWriter, r *http.Request) {
+	if !d.require(w, r, auth.RoleControl) {
+		return
+	}
 	var spec api.SessionSpec
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&spec); err != nil {
 		apiError(w, http.StatusBadRequest, "bad session spec: %v", err)
@@ -258,6 +499,7 @@ func (d *Daemon) handleSessionPost(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusInternalServerError, "%v", err)
 		return
 	}
+	d.audit(r, "session.start")
 	writeJSON(w, http.StatusOK, info)
 }
 
@@ -265,7 +507,11 @@ func (d *Daemon) handleSessionPost(w http.ResponseWriter, r *http.Request) {
 // service with it. The response goes out first — the daemon exits once
 // it has been delivered.
 func (d *Daemon) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
+	if !d.require(w, r, auth.RoleControl) {
+		return
+	}
 	d.stopSession()
+	d.audit(r, "session.terminate")
 	d.log.Info("session terminated by request; stopping the service")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	if fl, ok := w.(http.Flusher); ok {
@@ -276,6 +522,9 @@ func (d *Daemon) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 
 // handleEvents streams state changes and log lines as SSE.
 func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if !d.require(w, r, auth.RoleView) {
+		return
+	}
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		apiError(w, http.StatusInternalServerError, "streaming unsupported")
@@ -326,6 +575,10 @@ const attachWait = 20 * time.Second
 // hands it to the session's viewers. This is where "detached" and
 // "terminated" part ways: the session is untouched by a disconnect.
 func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
+	if !d.require(w, r, auth.RoleView) {
+		return
+	}
+	d.audit(r, "attach")
 	d.mu.Lock()
 	s := d.sess
 	d.mu.Unlock()
