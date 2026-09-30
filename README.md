@@ -696,10 +696,24 @@ internal/testfill    integration-test helper (paint/check/clip-set/clip-watch)
 
 ### Running as a service
 
-See `scripts/remmote-server.service` for a hardened systemd unit
-(`systemctl enable --now remmote-server`). It runs after
-`graphical.target` with `DISPLAY`/`XAUTHORITY` set to the session to
-share.
+`scripts/remmote-server.service` is a **user** unit: remmote shares your
+X session and can create displays and run programs on your behalf, so it
+runs as you, not as root.
+
+```sh
+cp scripts/remmote-server.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now remmote-server
+
+# on a machine nobody is logged into, keep it (and its X session) alive:
+loginctl enable-linger $USER
+```
+
+The pairing code for the first device is in the log
+(`journalctl --user -u remmote-server | grep 'pair a device'`) and in
+`~/.config/remmote/daemon/pairing-code`. `Restart=on-failure` keeps it
+up when it breaks — and leaves it down when a session is terminated on
+purpose, which is how the daemon is meant to end.
 
 ### Stopping
 

@@ -1,26 +1,36 @@
+# remmote screen-sharing daemon — a user service.
+#
+# It shares your X session and can create displays and run programs on
+# your behalf, so it belongs to your user, not to root:
+#
+#   cp scripts/remmote-server.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now remmote-server
+#
+# On a machine nobody is logged into, keep it (and its X session) alive:
+#
+#   loginctl enable-linger $USER
+#
+# The code to pair a device with is printed at startup and kept next to
+# the authority:
+#
+#   journalctl --user -u remmote-server | grep 'pair a device'
+#   cat ~/.config/remmote/daemon/pairing-code
+#
+# No sandboxing here on purpose: the daemon starts X servers and the
+# applications it is asked to share, and a restricted service cannot do
+# either. That is also why -auth matters — see the README.
+
 [Unit]
-Description=remmote screen-sharing server
-Documentation=file:///usr/local/share/doc/remmote/README.md
-# Screen capture needs a running X session for DISPLAY.
-After=graphical.target
-Wants=graphical.target
+Description=remmote screen-sharing daemon
+After=graphical-session.target
 
 [Service]
 Type=simple
-User=lepe
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/lepe/.Xauthority
-# -auth admits only paired devices (remmote-ctl pair -code …): without it
-# the listener must be TLS-only or loopback-only, and this is neither.
 ExecStart=/usr/local/bin/remmote-server -display :0 -listen :7677 -auth
 Restart=on-failure
 RestartSec=2
-
-# Hardening: everything remmote needs is X access and one TCP port.
 NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=read-only
 
 [Install]
-WantedBy=graphical.target
+WantedBy=graphical-session.target
