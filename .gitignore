@@ -1,4 +1,2 @@
-/bin/
-/vendor/
-*.test
-*.out
+__pycache__/
+*.pyc
