@@ -83,6 +83,14 @@ type Scene struct {
 	maximizeTarget xproto.Window
 	maximizeDone   bool
 
+	// Viewer-driven resize state, guarded by mu: the size a client asked
+	// for (0 = none), the window it applies to (0 = not picked yet), and
+	// what was last sent, so ApplyResize never repeats a request.
+	wantW, wantH       int
+	resizeTarget       xproto.Window
+	appliedW, appliedH int
+	appliedTo          xproto.Window
+
 	seg       *SHMSegment
 	segID     shm.Seg
 	hasSHM    bool
@@ -187,6 +195,7 @@ func (s *Scene) Resized() <-chan struct{} { return s.resized }
 func (s *Scene) ApplyResize() error {
 	s.evalCandidates()
 	s.refreshGeometry()
+	s.applyPendingResize() // after refreshGeometry: the solve uses a fresh rect
 	s.recomputeCanvas()
 	return nil
 }
@@ -571,6 +580,7 @@ func (s *Scene) removeWindow(id xproto.Window) {
 			if t.dmgOK {
 				damage.Destroy(s.xc.X, t.dmg)
 			}
+			s.forgetResizeTarget(id)
 			s.windows = append(s.windows[:i], s.windows[i+1:]...)
 			s.log.Info("window gone", "window", uint32(id))
 			break

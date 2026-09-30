@@ -39,6 +39,7 @@ func main() {
 		execCmd     = flag.String("exec", "", "run this command and share only its windows (e.g. -exec xcalc)")
 		windowID    = flag.String("window", "", "share this existing window id (hex) and windows it spawns")
 		maximize    = flag.Bool("maximize", false, "with -exec/-window: maximize the shared window on the host screen")
+		resizeDesk  = flag.Bool("resize-desktop", false, "whole-desktop mode: let a viewer resizing its window resize the host screen too (best effort via RANDR)")
 		useTLS      = flag.String("tls", "off", "encrypt the stream: 'auto' (or no value) to generate and print a certificate fingerprint, a shared secret both sides pass, or SHA256:… to assert the -tls-cert certificate")
 		tlsCert     = flag.String("tls-cert", "", "with -tls: PEM certificate to use (default: generate and cache one)")
 		tlsKey      = flag.String("tls-key", "", "with -tls: PEM private key to use (default: generate and cache one)")
@@ -85,21 +86,22 @@ func main() {
 	defer stop()
 	go func() { <-ctx.Done(); stop() }()
 	srv, err := server.NewContext(ctx, server.Options{
-		Display:     *display,
-		ListenAddr:  *listen,
-		FPS:         *fps,
-		Downscale:   *downscale,
-		Quality:     *quality,
-		Codec:       codecID,
-		FullRefresh: *refresh,
-		NoClipboard: *noClipboard,
-		Exec:        *execCmd,
-		Window:      uint32(winID),
-		Maximize:    *maximize,
-		TLS:         tlsutil.On(*useTLS),
-		TLSValue:    *useTLS,
-		TLSCertFile: *tlsCert,
-		TLSKeyFile:  *tlsKey,
+		Display:       *display,
+		ListenAddr:    *listen,
+		FPS:           *fps,
+		Downscale:     *downscale,
+		Quality:       *quality,
+		Codec:         codecID,
+		FullRefresh:   *refresh,
+		NoClipboard:   *noClipboard,
+		Exec:          *execCmd,
+		Window:        uint32(winID),
+		Maximize:      *maximize,
+		ResizeDesktop: *resizeDesk,
+		TLS:           tlsutil.On(*useTLS),
+		TLSValue:      *useTLS,
+		TLSCertFile:   *tlsCert,
+		TLSKeyFile:    *tlsKey,
 	}, log)
 	if err != nil {
 		if ctx.Err() != nil {

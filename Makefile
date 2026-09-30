@@ -23,6 +23,7 @@ integration: build
 	./scripts/integration-delta.sh hybrid 2 2
 	./scripts/integration-exec.sh
 	./scripts/integration-maximize.sh
+	./scripts/integration-resize.sh
 	./scripts/integration-tls.sh
 
 integration-shutdown: build

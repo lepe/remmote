@@ -444,6 +444,16 @@ type outMsg struct {
 type sender struct {
 	q   *outQueue
 	div int
+
+	// Window sizes are debounced: a resize drag emits ConfigureNotify
+	// per step, and every request that reaches the host costs an X round
+	// trip (a RANDR mode change in desktop mode), so only the size the
+	// user settles on goes out. gen makes a superseded timer a no-op.
+	mu    sync.Mutex
+	rw    int
+	rh    int
+	gen   uint64
+	timer *time.Timer
 }
 
 func (s *sender) MouseMove(x, y int) { s.q.mouseMove(x/max(s.div, 1), y/max(s.div, 1)) }
@@ -454,6 +464,39 @@ func (s *sender) Button(b uint8, down bool) {
 
 func (s *sender) Key(ks uint32, down bool) {
 	s.q.event(proto.MsgKey, (&proto.Key{Down: down, Keysym: ks}).Encode())
+}
+
+// resizeDebounce is how long a resize must pause before the newest size
+// goes on the wire (trailing edge: the last size of a drag wins).
+const resizeDebounce = 200 * time.Millisecond
+
+// Resize records the new window size and (re)arms the debounce timer.
+func (s *sender) Resize(w, h int) {
+	s.mu.Lock()
+	s.rw, s.rh = w, h
+	s.gen++
+	gen := s.gen
+	if s.timer != nil {
+		s.timer.Stop()
+	}
+	s.timer = time.AfterFunc(resizeDebounce, func() { s.flushResize(gen) })
+	s.mu.Unlock()
+}
+
+// flushResize sends the settled size, unless a newer one superseded it.
+// Coordinates follow MouseMove's rule: divided by -upscale on the way
+// out, multiplied back by -downscale on the server.
+func (s *sender) flushResize(gen uint64) {
+	s.mu.Lock()
+	if gen != s.gen {
+		s.mu.Unlock()
+		return
+	}
+	w, h := s.rw, s.rh
+	s.mu.Unlock()
+	div := max(s.div, 1)
+	w, h = max(1, min(w/div, 65535)), max(1, min(h/div, 65535))
+	s.q.event(proto.MsgResize, (&proto.Resize{Width: uint16(w), Height: uint16(h)}).Encode())
 }
 
 // runOnce connects, waits for the first keyframe, snapshots it, exits.

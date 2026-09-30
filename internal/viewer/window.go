@@ -14,11 +14,12 @@ import (
 )
 
 // EventListener receives local input, already mapped to host-screen
-// coordinates and keysyms.
+// coordinates and keysyms, plus viewer window size changes.
 type EventListener interface {
 	MouseMove(x, y int) // host screen coordinates
 	Button(b uint8, down bool)
 	Key(ks uint32, down bool)
+	Resize(w, h int) // the viewer window's size, in the same coordinates
 }
 
 // Window is the client's viewer window on the local X display.
@@ -37,6 +38,11 @@ type Window struct {
 	serverW, serverH int
 
 	winW, winH int // our window size; touched only by the event pump
+
+	// sentW/sentH is the last size reported to the listener — the size
+	// the window was created with, so a window manager's initial
+	// placement never resizes anything on the host. Event pump only.
+	sentW, sentH int
 
 	deleteAtom xproto.Atom
 }
@@ -71,6 +77,9 @@ func Open(display string, serverW, serverH int, title string, log *slog.Logger, 
 	w.winW = min(w.serverW, int(sw)*8/10)
 	w.winH = min(w.serverH, int(sh)*8/10)
 	w.winW, w.winH = max(w.winW, 200), max(w.winH, 150)
+	// Already "reported": a size change must be the user's doing, not a
+	// window manager's first placement of the window it was born with.
+	w.sentW, w.sentH = w.winW, w.winH
 
 	wid, err := xc.X.NewId()
 	if err != nil {
@@ -191,6 +200,7 @@ func (w *Window) Pump(l EventListener) error {
 		case xproto.ConfigureNotifyEvent:
 			w.winW, w.winH = int(e.Width), int(e.Height)
 			w.blit.RequestResize(w.winW, w.winH)
+			w.reportResize(l)
 
 		case xproto.MotionNotifyEvent:
 			if l != nil {
@@ -238,6 +248,25 @@ func (w *Window) Pump(l EventListener) error {
 			return nil
 		}
 	}
+}
+
+// reportResize tells the listener the window changed size — once per
+// size, so a ConfigureNotify storm during an interactive drag cannot
+// turn into a stream of host-side resize requests (the listener
+// debounces on top of this). Deduplication is against the size last
+// reported, which Open seeds with the window's created size: the first
+// ConfigureNotify a window manager emits is usually a pure placement,
+// and following it would resize the host without the user having
+// touched anything. Event pump only.
+func (w *Window) reportResize(l EventListener) {
+	if l == nil || w.winW <= 0 || w.winH <= 0 {
+		return
+	}
+	if w.winW == w.sentW && w.winH == w.sentH {
+		return
+	}
+	w.sentW, w.sentH = w.winW, w.winH
+	l.Resize(w.winW, w.winH)
 }
 
 // mapPointer converts window coordinates to host screen coordinates

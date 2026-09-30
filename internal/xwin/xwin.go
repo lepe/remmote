@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/jezek/xgb"
+	"github.com/jezek/xgb/randr"
 	"github.com/jezek/xgb/xproto"
 )
 
@@ -22,11 +23,17 @@ type Client struct {
 
 	mu    sync.Mutex
 	atoms map[string]xproto.Atom
+
+	// madeModes caches the exact-size modes created for virtual outputs
+	// (see createMode), keyed by output and size.
+	madeModes map[string]randr.Mode
 }
 
 // NewClient wraps a connection and its root window.
 func NewClient(x *xgb.Conn, root xproto.Window) *Client {
-	return &Client{x: x, root: root, atoms: make(map[string]xproto.Atom)}
+	return &Client{x: x, root: root,
+		atoms:     make(map[string]xproto.Atom),
+		madeModes: make(map[string]randr.Mode)}
 }
 
 // Root returns the root window queries are anchored to.
@@ -216,6 +223,11 @@ func (c *Client) Maximize(w xproto.Window) (string, error) {
 
 // maximizeClientMessage builds the 32-byte ClientMessage that asks a
 // window manager to add _NET_WM_STATE_MAXIMIZED_{VERT,HORZ} to w.
+func maximizeClientMessage(w xproto.Window, state, vert, horz xproto.Atom) []byte {
+	return wmStateClientMessage(w, state, wmStateAdd, vert, horz)
+}
+
+// wmStateClientMessage builds the 32-byte _NET_WM_STATE ClientMessage.
 //
 // Layout: code(1) format(1) seq(2) window(4) type(4) data(20), where the
 // data is [action, arg1, arg2, source, pad]. The event is built by hand
@@ -224,13 +236,13 @@ func (c *Client) Maximize(w xproto.Window) (string, error) {
 // have to be packed explicitly. Little-endian, for the same reason as
 // sendSelectionNotify in internal/clipboard: xgb negotiates an LSB-first
 // connection, as do x86 Xlib clients.
-func maximizeClientMessage(w xproto.Window, state, vert, horz xproto.Atom) []byte {
+func wmStateClientMessage(w xproto.Window, state xproto.Atom, action uint32, vert, horz xproto.Atom) []byte {
 	b := make([]byte, 32)
 	b[0] = 33 // ClientMessage
 	b[1] = 32 // format: 32-bit
 	binary.LittleEndian.PutUint32(b[4:8], uint32(w))
 	binary.LittleEndian.PutUint32(b[8:12], uint32(state))
-	binary.LittleEndian.PutUint32(b[12:16], 1) // _NET_WM_STATE_ADD
+	binary.LittleEndian.PutUint32(b[12:16], action)
 	binary.LittleEndian.PutUint32(b[16:20], uint32(vert))
 	binary.LittleEndian.PutUint32(b[20:24], uint32(horz))
 	binary.LittleEndian.PutUint32(b[24:28], 1) // source indication: application

@@ -48,6 +48,10 @@ func TestMessagesRoundTrip(t *testing.T) {
 	roundTrip(t, MsgScreenResize, resize, resize.Encode,
 		func(p []byte) (any, error) { return DecodeScreenResize(p) })
 
+	req := &Resize{Width: 1600, Height: 900}
+	roundTrip(t, MsgResize, req, req.Encode,
+		func(p []byte) (any, error) { return DecodeResize(p) })
+
 	ping := &PingPong{Nonce: 0xDEADBEEFCAFEBABE, TS: 1725999999999}
 	roundTrip(t, MsgPing, ping, ping.Encode,
 		func(p []byte) (any, error) { return DecodePingPong(p) })
@@ -156,6 +160,9 @@ func TestDecodeRejectsBadPayloads(t *testing.T) {
 		{"rectupdate zero size", func(p []byte) error { _, err := DecodeRectUpdate(p); return err }, make([]byte, 14), ErrBadPayload},
 		{"rectupdate bad codec", func(p []byte) error { _, err := DecodeRectUpdate(p); return err }, []byte{0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 9, 0}, ErrBadPayload},
 		{"resize short", func(p []byte) error { _, err := DecodeScreenResize(p); return err }, make([]byte, 3), ErrShortPayload},
+		{"resize request short", func(p []byte) error { _, err := DecodeResize(p); return err }, make([]byte, 3), ErrShortPayload},
+		{"resize request zero width", func(p []byte) error { _, err := DecodeResize(p); return err }, []byte{0, 0, 0, 100}, ErrBadPayload},
+		{"resize request zero height", func(p []byte) error { _, err := DecodeResize(p); return err }, []byte{0, 100, 0, 0}, ErrBadPayload},
 		{"ping short", func(p []byte) error { _, err := DecodePingPong(p); return err }, make([]byte, 15), ErrShortPayload},
 		{"mousemove short", func(p []byte) error { _, err := DecodeMouseMove(p); return err }, make([]byte, 3), ErrShortPayload},
 		{"mousebutton short", func(p []byte) error { _, err := DecodeMouseButton(p); return err }, make([]byte, 1), ErrShortPayload},

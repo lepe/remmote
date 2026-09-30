@@ -7,12 +7,16 @@ import "errors"
 
 const (
 	// ProtoVersion is the wire protocol version this build speaks.
-	// v2 added the Clipboard message; v3 added the ZRAW codec byte.
+	// v2 added the Clipboard message; v3 added the ZRAW codec byte;
+	// v4 added the Resize request (client → server).
 	//
 	// The server refuses mismatched versions, so adding a wire value that
 	// older clients cannot decode (ZRAW) requires a bump: without it a v2
-	// client would complete the handshake and then drop every rect.
-	ProtoVersion uint16 = 3
+	// client would complete the handshake and then drop every rect. v4
+	// exists because an *older server* would drop the connection on a
+	// message type it does not know — a v4 client must not reach one
+	// silently.
+	ProtoVersion uint16 = 4
 
 	// HeaderSize is the fixed frame header: 'R','M',type,flags,length u32.
 	HeaderSize = 8
@@ -39,6 +43,7 @@ const (
 	MsgSetQuality   MsgType = 0x0B
 	MsgClose        MsgType = 0x0C
 	MsgClipboard    MsgType = 0x0D
+	MsgResize       MsgType = 0x0E
 )
 
 func (t MsgType) String() string {
@@ -69,6 +74,8 @@ func (t MsgType) String() string {
 		return "Close"
 	case MsgClipboard:
 		return "Clipboard"
+	case MsgResize:
+		return "Resize"
 	default:
 		return "Unknown"
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/jezek/xgb/xproto"
 
 	"github.com/lepe/remmote/internal/xconn"
+	"github.com/lepe/remmote/internal/xwin"
 )
 
 // Options configures a Capturer.
@@ -33,6 +34,7 @@ type Options struct {
 // else is called from the single capture-loop goroutine.
 type Capturer struct {
 	xc   *xconn.Conn
+	xq   *xwin.Client // RANDR helpers (screen resize)
 	log  *slog.Logger
 	opts Options
 
@@ -63,6 +65,7 @@ func New(xc *xconn.Conn, opts Options, log *slog.Logger) (*Capturer, error) {
 	}
 	c := &Capturer{
 		xc:      xc,
+		xq:      xwin.NewClient(xc.X, xc.Root()),
 		log:     log,
 		opts:    opts,
 		changed: make(chan struct{}, 1),
@@ -260,6 +263,25 @@ func (c *Capturer) ApplyResize() error {
 	}
 	w, h := c.xc.ScreenSize()
 	c.log.Info("screen resized", "width", w, "height", h)
+	return nil
+}
+
+// ResizeTo resizes the shared screen — the whole desktop — to w×h. The
+// request itself is RANDR best effort (see xwin.ResizeScreen): when the
+// display accepts it the change comes back through the ordinary RANDR
+// notification, which rebuilds the buffers and broadcasts ScreenResize
+// plus a keyframe; when it refuses (an Xvfb screen can never be
+// resized), the error says why and the viewer keeps letterboxing.
+// Capture-loop only.
+func (c *Capturer) ResizeTo(w, h int) error {
+	aw, ah, err := c.xq.ResizeScreen(w, h)
+	if err != nil {
+		return err
+	}
+	if aw != w || ah != h {
+		return fmt.Errorf("capture: display limited the screen to %dx%d (asked for %dx%d)",
+			aw, ah, w, h)
+	}
 	return nil
 }
 

@@ -33,21 +33,22 @@ import (
 
 // Options configures the server.
 type Options struct {
-	Display     string
-	ListenAddr  string
-	FPS         int
-	Downscale   int           // 1, 2 or 4: divide wire dimensions; input stays in host coordinates
-	Quality     int           // 1-100, initial encoder quality
-	Codec       uint8         // proto.CodecJPEG or proto.CodecWebP
-	FullRefresh time.Duration // periodic keyframe interval
-	NoClipboard bool          // disable clipboard synchronization
-	Exec        string        // run this command and share only its windows
-	Window      uint32        // seed the window set with this window id
-	Maximize    bool          // with -exec/-window: maximize the shared window on the host screen
-	TLS         bool          // encrypt the stream with TLS (still no client authentication)
-	TLSValue    string        // the -tls argument: default mode, a shared secret, or a fingerprint
-	TLSCertFile string        // PEM certificate for -tls ("" = generate and cache one)
-	TLSKeyFile  string        // PEM private key for -tls ("" = generate and cache one)
+	Display       string
+	ListenAddr    string
+	FPS           int
+	Downscale     int           // 1, 2 or 4: divide wire dimensions; input stays in host coordinates
+	Quality       int           // 1-100, initial encoder quality
+	Codec         uint8         // proto.CodecJPEG or proto.CodecWebP
+	FullRefresh   time.Duration // periodic keyframe interval
+	NoClipboard   bool          // disable clipboard synchronization
+	Exec          string        // run this command and share only its windows
+	Window        uint32        // seed the window set with this window id
+	Maximize      bool          // with -exec/-window: maximize the shared window on the host screen
+	ResizeDesktop bool          // whole-desktop mode: let a viewer's window resize the host screen (RANDR)
+	TLS           bool          // encrypt the stream with TLS (still no client authentication)
+	TLSValue      string        // the -tls argument: default mode, a shared secret, or a fingerprint
+	TLSCertFile   string        // PEM certificate for -tls ("" = generate and cache one)
+	TLSKeyFile    string        // PEM private key for -tls ("" = generate and cache one)
 }
 
 // StreamSource is the capture backend the server streams: the root
@@ -69,6 +70,22 @@ type StreamSource interface {
 // dumper is the optional diagnostics path (-dump-frame).
 type dumper interface{ DumpFrame(path string) error }
 
+// surfaceResizer is the optional capability of a StreamSource: making the
+// shared surface match a viewer's window size. The root screen does it
+// through RANDR (and may refuse), an application window through EWMH.
+type surfaceResizer interface {
+	ResizeTo(w, h int) error
+}
+
+// Bounds on a viewer-driven resize request, in host pixels. Requests
+// arrive from the wire (uint16) and are only ever a viewer window's size,
+// so these exist to keep a malformed or hostile value from asking the X
+// server for a 65535 px framebuffer or a 1 px one.
+const (
+	minResizePx = 64
+	maxResizePx = 16384
+)
+
 // Server is the running screen-sharing host.
 type Server struct {
 	opts Options
@@ -83,6 +100,14 @@ type Server struct {
 	clip    *clipboard.Watcher // nil when disabled
 	proc    *launch.Proc       // nil unless -exec
 	appName string             // window-mode display name
+
+	// Viewer-driven resize: latest-wins handoff from the session readers
+	// to the capture loop, which is the only goroutine allowed to touch
+	// the capture source. resizer is nil when the source cannot resize.
+	resizer      surfaceResizer
+	resizeReq    chan image.Point
+	resizeWarned atomic.Bool
+	desktop      bool // sharing the root screen (the -resize-desktop policy applies)
 
 	quality atomic.Int32
 
@@ -130,6 +155,9 @@ func NewContext(ctx context.Context, opts Options, log *slog.Logger) (*Server, e
 
 	if opts.Quality < 1 || opts.Quality > 100 {
 		return nil, fmt.Errorf("server: quality %d out of range 1..100", opts.Quality)
+	}
+	if opts.ResizeDesktop && (opts.Exec != "" || opts.Window != 0) {
+		log.Warn("-resize-desktop has no effect when sharing an application; the viewer resizes the shared window itself")
 	}
 	xc, err := xconn.Dial(opts.Display)
 	if err != nil {
@@ -238,6 +266,13 @@ func NewContext(ctx context.Context, opts Options, log *slog.Logger) (*Server, e
 	if router == nil {
 		router = input.NewRouter(inj, ixc.X, nil, log)
 	}
+	// The resize capability is asked of the unwrapped source: the scaling
+	// wrapper below only changes wire dimensions, never the surface.
+	var resizer surfaceResizer
+	if r, ok := src.(surfaceResizer); ok {
+		resizer = r
+	}
+	desktop := opts.Exec == "" && opts.Window == 0
 
 	enc, err := encode.New(opts.Codec)
 	if err != nil {
@@ -253,18 +288,21 @@ func NewContext(ctx context.Context, opts Options, log *slog.Logger) (*Server, e
 		src = &scaledSource{StreamSource: src, factor: opts.Downscale}
 	}
 	s := &Server{
-		opts:     opts,
-		log:      log,
-		xc:       xc,
-		ixc:      ixc,
-		src:      src,
-		inj:      inj,
-		rt:       router,
-		enc:      enc,
-		proc:     proc,
-		appName:  appName,
-		sessions: make(map[uint64]*session),
-		kick:     make(chan struct{}, 1),
+		opts:      opts,
+		log:       log,
+		xc:        xc,
+		ixc:       ixc,
+		src:       src,
+		inj:       inj,
+		rt:        router,
+		enc:       enc,
+		proc:      proc,
+		appName:   appName,
+		resizer:   resizer,
+		resizeReq: make(chan image.Point, 1),
+		desktop:   desktop,
+		sessions:  make(map[uint64]*session),
+		kick:      make(chan struct{}, 1),
 	}
 	s.quality.Store(int32(opts.Quality))
 	return s, nil
@@ -593,6 +631,53 @@ func (s *Server) shutdown() {
 	s.xc.Close()
 }
 
+// requestResize hands a viewer's window size (already in host
+// coordinates) to the capture loop, which is the only goroutine allowed
+// to resize the shared surface. Latest wins: dragging a window edge
+// produces a burst of sizes, and only the last one is worth an X round
+// trip.
+func (s *Server) requestResize(w, h int) {
+	if s.resizer == nil {
+		return
+	}
+	w = min(max(w, minResizePx), maxResizePx)
+	h = min(max(h, minResizePx), maxResizePx)
+	if s.desktop && !s.opts.ResizeDesktop {
+		if s.resizeWarned.CompareAndSwap(false, true) {
+			s.log.Warn("a viewer asked to resize the host screen; ignoring it — start the server with -resize-desktop to let viewers change the screen size",
+				"width", w, "height", h)
+		}
+		return
+	}
+	p := image.Pt(w, h)
+	select {
+	case s.resizeReq <- p:
+	default:
+		select { // drop the stale size, install the newest one
+		case <-s.resizeReq:
+		default:
+		}
+		select {
+		case s.resizeReq <- p:
+		default:
+		}
+	}
+}
+
+// applyResize applies one recorded viewer size to the shared surface.
+// Capture-loop only.
+func (s *Server) applyResize(p image.Point) {
+	if s.resizer == nil {
+		return
+	}
+	if err := s.resizer.ResizeTo(p.X, p.Y); err != nil {
+		s.log.Warn("shared surface refused to resize; the viewer keeps letterboxing",
+			"width", p.X, "height", p.Y, "err", err)
+		return
+	}
+	s.log.Debug("shared surface resize requested", "width", p.X, "height", p.Y)
+}
+
 // captureLoop paces frame production: damage-driven with an fps-capped
 // merge window, plus keyframes on resize, client join, dropped frames, and
 // (when anything changed) the periodic refresh ticker. It is the only
@@ -607,6 +692,8 @@ func (s *Server) captureLoop(ctx context.Context) {
 			return
 		case <-s.kick:
 			s.sendKeyframe()
+		case p := <-s.resizeReq:
+			s.applyResize(p)
 		case <-s.src.Resized():
 			if err := s.src.ApplyResize(); err != nil {
 				s.log.Error("apply resize", "err", err)

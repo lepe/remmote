@@ -154,6 +154,39 @@ func DecodeScreenResize(p []byte) (*ScreenResize, error) {
 	}, nil
 }
 
+// Resize asks the server to grow or shrink the shared surface to the
+// viewer's window size, in stream coordinates (the same frame MouseMove
+// travels in: the server multiplies by its -downscale, the client divided
+// by -upscale). The server applies it to the shared application's main
+// window (-exec/-window) or, when it was started with -resize-desktop, to
+// the host screen; when it cannot, the message is ignored and the viewer
+// keeps letterboxing.
+type Resize struct {
+	Width  uint16
+	Height uint16
+}
+
+func (m *Resize) Encode() []byte {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint16(b[0:2], m.Width)
+	binary.BigEndian.PutUint16(b[2:4], m.Height)
+	return b
+}
+
+func DecodeResize(p []byte) (*Resize, error) {
+	if len(p) < 4 {
+		return nil, fmt.Errorf("%w: Resize: %d bytes", ErrShortPayload, len(p))
+	}
+	m := &Resize{
+		Width:  binary.BigEndian.Uint16(p[0:2]),
+		Height: binary.BigEndian.Uint16(p[2:4]),
+	}
+	if m.Width == 0 || m.Height == 0 {
+		return nil, fmt.Errorf("%w: Resize: empty %dx%d", ErrBadPayload, m.Width, m.Height)
+	}
+	return m, nil
+}
+
 // Ping / Pong keepalive. Pong echoes the nonce and timestamp verbatim.
 type PingPong struct {
 	Nonce uint64

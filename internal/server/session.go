@@ -124,6 +124,14 @@ func (sess *session) reader(ctx context.Context) {
 				sess.srv.quality.Store(int32(m.Quality))
 				sess.srv.log.Info("quality changed", "quality", m.Quality, "client", sess.id)
 			}
+		case proto.MsgResize:
+			// Stream coordinates, like MouseMove: the client divided by
+			// its -upscale, so multiply back by -downscale to land in
+			// host pixels.
+			if m, err := proto.DecodeResize(payload); err == nil {
+				f := max(1, sess.srv.opts.Downscale)
+				sess.srv.requestResize(int(m.Width)*f, int(m.Height)*f)
+			}
 		case proto.MsgPong, proto.MsgPing:
 			// keepalive traffic; the read deadline is fed
 		case proto.MsgClipboard:

@@ -16,8 +16,9 @@ views and drives.
 - **`remmote-client`** — runs on the **viewer**. Opens its own X11 window
   (created directly with the same pure-Go X bindings — no GUI toolkit),
   composites the stream, rescales live when you resize the window
-  (letterbox), and forwards your input with host-screen coordinate
-  mapping.
+  (letterbox), forwards your input with host-screen coordinate mapping —
+  and, since v4, resizes the host side to match: the shared application
+  in `-exec`/`-window` mode, or the host desktop with `-resize-desktop`.
 - **Clipboard sync** — copy on either machine, paste on the other
   (UTF-8 text, bidirectional, ≤256 KiB; disable with `-no-clipboard` on
   either side).
@@ -83,6 +84,21 @@ make build-webp                  # → same binaries + WebP, run server with -co
 
 ## Usage
 
+Rather answer questions than assemble flags? `./scripts/remmote.sh`
+asks what to run (server or client), on which display, and with which
+options — including `-exec`, `-window`, `-maximize`, `-resize-desktop`
+and the three `-tls` modes — then prints the exact command line and runs
+it (`--print` to only print it). On the server side it also prints, in a
+box, the `remmote-client` command that connects to it — with the right
+address (this machine's, over a tunnel when the server listens on
+localhost only) and the matching `-tls`, `-upscale` and clipboard flags.
+Name a display that does not exist yet and it offers to create one for
+you, running `scripts/start-xvfb.sh` or `scripts/start-xephyr.sh` and
+picking up the cookie they make — and a display it started is stopped
+again when the run ends, Ctrl-C included (only `--print` or "run it
+now? n" keep it, since the printed command still needs it). The manual
+form follows.
+
 Share the whole desktop — on the **host**:
 
 ```sh
@@ -111,6 +127,53 @@ That's it — move the mouse over the window and type. Close the viewer
 window to disconnect (the client also auto-reconnects if the network
 drops).
 
+### Your own display (headless or nested)
+
+`-display` takes any X display, including one you start yourself — no
+existing desktop session is required. Two scripts do the asking and the
+starting; they explain their limitations first, detect (or offer to
+install) what is missing, and let you pick the display number and an
+optional window manager for inside it:
+
+```sh
+./scripts/start-xvfb.sh     # headless screen :88 (Xvfb) — nothing visible locally
+./scripts/start-xephyr.sh   # nested screen :88 in a window on your own desktop (Xephyr)
+```
+
+Both protect the new display with a magic cookie (xauth) and print the
+exact remmote-server command line to run against it. Underneath it is
+ordinary X:
+
+```sh
+Xvfb :88 -screen 0 1920x1080x24 &        # apt install xvfb
+XAUTHORITY=~/.Xauthority ./bin/remmote-server -display :88 -listen :7677 -exec xcalc
+
+# or let xvfb-run make the display and just use its $DISPLAY:
+xvfb-run -a ./bin/remmote-server -listen :7677 -exec xcalc
+```
+
+Worth knowing about a display you create:
+
+- **There is no window manager** unless you start one, so windows are
+  neither decorated nor placed — remmote handles bare displays (that is
+  exactly how its integration tests run), but `DISPLAY=:88 openbox &`
+  gives the application normal decorations if you want them. Both
+  scripts can start one for you (whatever is installed: openbox,
+  fluxbox, marco, mutter, …).
+- **An Xvfb screen is fixed when it is created.** Xvfb offers RANDR
+  exactly one mode — its `-screen` size — so it can never be resized
+  afterwards: with `-resize-desktop` the server logs the refusal and the
+  viewer letterboxes as usual. Xephyr's nested screen follows its
+  window instead (resize the window on the host desktop) and accepts
+  `-resize-desktop` through its RandR (imperfectly: its mode list is
+  fixed and even gets emptied on a window resize, which remmote works
+  around), while a real Xorg session with outputs resizes normally.
+  *Window* mode (`-exec`/`-window`) resizes the application itself and
+  works on any display.
+- **An unprotected display is shared with every local user.** The
+  scripts generate a magic cookie unless you pass `--no-auth`; do that
+  only where you trust everyone with an account.
+
 ### Window mode (`-exec` / `-window`)
 
 The viewer then sees a mini-desktop that is exactly the application: the
@@ -130,6 +193,18 @@ plain resize otherwise, and it is applied once, when the window becomes
 viewable — so it also works for an application whose window appears late,
 or a single-instance one that hands off to an already-running process.
 Dialogs keep their natural size.
+
+**Resizing the viewer window resizes the application** — the viewer ends
+up a 1:1 view of it, no letterbox. The size travels as a `Resize` message
+(debounced, so a drag sends only the size you settle on), and the server
+applies it to the main window the same way `-maximize` does: EWMH
+`_NET_MOVERESIZE_WINDOW` through the window manager — announced with only
+the width/height bits so the window does not move — or a plain
+`ConfigureWindow` on a bare display. The canvas then recomputes with a
+keyframe, and because it is quantized to a 32 px grid the fill is exact
+to within ±16 px. Dialogs keep their natural size, as with `-maximize`;
+if an application refuses the size (terminal columns, size increments),
+the viewer letterboxes what it gets.
 
 When the application exits the **server stays up** and keeps serving the
 last frame; restarting the share means restarting the command. Shutting
@@ -156,6 +231,7 @@ keyframe (2 s).
 | `-exec` | — | run this command and share only its windows (e.g. `-exec xcalc`) |
 | `-window` | — | share this existing window id (hex) and windows it spawns |
 | `-maximize` | off | with `-exec`/`-window`: maximize the shared window onto the host screen once it appears |
+| `-resize-desktop` | off | whole-desktop mode: let a viewer's window resize the host screen (best effort via RANDR; ignored with `-exec`/`-window`, which resize the application instead) |
 | `-tls` | off | encrypt the stream: no value to generate and print a certificate fingerprint, a shared secret both sides pass (it also makes the server admit only clients that have it), or `SHA256:…` to assert the `-tls-cert` certificate |
 | `-tls-cert` | — | with `-tls`: PEM certificate to use (default: generate and cache one) |
 | `-tls-key` | — | with `-tls`: PEM private key to use (default: generate and cache one) |
@@ -231,7 +307,34 @@ reduces that demand at the cost of slower visual feedback. A longer server
 See [PERFORMANCE.md](PERFORMANCE.md) for measured tradeoffs and benchmark commands.
 
 
-### Encryption (TLS)
+### Resizing the host desktop (`-resize-desktop`)
+
+In whole-desktop mode, resizing the viewer window normally only changes
+the letterbox. Start the server with `-resize-desktop` and the same drag
+resizes the **host screen**: the server asks RANDR for the framebuffer
+size the viewer's window asked for, clamped to what the display allows,
+and — when the screen has to shrink — first moves each output to the
+largest mode that fits before retrying.
+
+```sh
+./bin/remmote-server -display :0 -listen :7677 -resize-desktop
+```
+
+- **Best effort, and it falls back quietly.** Displays vary wildly in
+  what they accept: Xvfb exposes a single fixed mode (its screen can
+  never be resized), a monitor may have no mode near the size you asked
+  for, and a multi-head session may not be packable that small. When the
+  server cannot do it, it logs one warning — the viewer keeps
+  letterboxing, and the desktop is left exactly as it was (a mode change
+  that is refused is rolled back).
+- **This changes your real desktop.** Windows relayout, outputs are
+  re-moded, and on a multi-monitor host both screens take part. That is
+  why the flag exists: without it the server ignores the request with a
+  single log line telling you how to enable it.
+- The viewer needs no flag; every connected viewer can drive it, so the
+  last resize wins.
+
+
 
 `-tls` takes an optional value, and both sides read it the same way:
 
@@ -351,18 +454,23 @@ Two things worth knowing before you rely on it:
   cannot drain at all.
 - **Screen resize**: RANDR notifications rebuild the capture buffers and
   announce `ScreenResize` followed by a keyframe; the viewer adapts without
-  restarting.
+  restarting. The same path carries viewer-driven resizes: a `Resize`
+  message (debounced on the client, latest-wins on the server) sizes the
+  shared application's main window in window mode, or — with
+  `-resize-desktop` — the host framebuffer in whole-desktop mode.
 - **Keepalive**: the server pings every 10 s; both sides use 30 s read
   deadlines, so dead peers are reaped instead of hanging.
 
-## Wire protocol (v3)
+## Wire protocol (v4)
 
 TCP, big-endian, optionally wrapped in TLS (`-tls`). Frame:
 `'R' 'M' type flags length:u32 payload`
 (max payload 32 MiB). Client speaks first. v2 added the Clipboard
-message; v3 added the ZRAW codec. The server refuses a mismatched
-`ClientHello.version`, so a v2 client now gets an explicit refusal
-instead of connecting and then dropping every rect.
+message; v3 added the ZRAW codec byte; v4 added the Resize request. The
+server refuses a mismatched `ClientHello.version`, so a v3 client now
+gets an explicit refusal instead of connecting and then having its
+resize requests treated as an unknown message (an unknown type from a
+client drops the connection).
 
 | Type | Message | Direction | Payload |
 |---|---|---|---|
@@ -378,6 +486,7 @@ instead of connecting and then dropping every rect.
 | 0x0B | SetQuality | C→S | quality u8 |
 | 0x0C | Close | both | code u8, reason |
 | 0x0D | Clipboard | both | len u32 + UTF-8 text (≤256 KiB) |
+| 0x0E | Resize | C→S | width, height — the viewer window, stream coords |
 
 ## Troubleshooting
 
@@ -407,7 +516,9 @@ make test          # unit tests (no X needed)
 make lint          # go vet + gofmt check
 make integration   # keyframe (hybrid + jpeg) and live-delta pipelines on Xvfb
 ./scripts/integration-window.sh   # window-mode (-window) end-to-end
+./scripts/integration-resize.sh   # viewer resize → window / desktop policy (also in make integration)
 ./scripts/integration-delta.sh    # live delta updates, position-exact (also in make integration)
+./scripts/start-xvfb.sh …         # interactive helpers: create a display (xvfb/xephyr), launch remmote
 make vendor        # vendor deps for offline builds
 ```
 
