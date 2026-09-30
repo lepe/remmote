@@ -17,6 +17,7 @@ test:
 	CGO_ENABLED=0 $(GO) test ./...
 
 integration: build
+	./scripts/integration-control.sh
 	./scripts/integration.sh
 	./scripts/integration.sh jpeg
 	./scripts/integration-delta.sh

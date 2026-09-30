@@ -1,16 +1,36 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/lepe/remmote/internal/proto"
 )
+
+// serveUpgrade answers the client's attach request with the 101 a real
+// daemon sends, so a fake server speaks to the stream exactly where the
+// daemon hands the connection over.
+func serveUpgrade(conn net.Conn) error {
+	br := bufio.NewReader(conn)
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+	}
+	_, err := conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: remmote\r\nConnection: Upgrade\r\n\r\n"))
+	return err
+}
 
 func TestHandshakePreservesFirstFrame(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -26,6 +46,10 @@ func TestHandshakePreservesFirstFrame(t *testing.T) {
 			return
 		}
 		defer conn.Close()
+		if err := serveUpgrade(conn); err != nil {
+			done <- err
+			return
+		}
 		if _, _, _, err := proto.ReadMsg(conn); err != nil {
 			done <- err
 			return
@@ -100,6 +124,9 @@ func TestCancellationInterruptsHandshakeAndFirstFrame(t *testing.T) {
 					return
 				}
 				defer conn.Close()
+				if err := serveUpgrade(conn); err != nil {
+					return
+				}
 				if _, _, _, err := proto.ReadMsg(conn); err != nil {
 					return
 				}

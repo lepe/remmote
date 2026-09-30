@@ -127,6 +127,50 @@ That's it — move the mouse over the window and type. Close the viewer
 window to disconnect (the client also auto-reconnects if the network
 drops).
 
+### The daemon and its session
+
+`remmote-server` is a daemon, and the session lives in it — not in the
+viewer. Closing the viewer window *detaches*: the display, the
+application and the capture keep running, and a viewer can attach again
+at any time (that is the point of leaving it running). Ending the
+session is deliberate: `remmote-ctl terminate` stops the session and
+the service with it.
+
+The flags above describe the session shared **at startup**. A client can
+also say what to share, at any time, over the control API — `remmote-ctl
+start -spec spec.json` or, once it exists, the GUI — and with `-idle`
+the daemon shares nothing until one does. Only one session runs per
+daemon.
+
+Launching an application on request (`source: "app"`) is refused by
+default: the daemon will share displays and windows that already exist,
+but running a program on the host is the operator's decision — start it
+with `-allow-exec xcalc,xterm` to permit those commands.
+
+```sh
+# a daemon that waits for a client to say what to share
+./bin/remmote-server -idle -listen :7677 -allow-exec xcalc
+
+# ... and a client that starts a session on it
+./bin/remmote-ctl -server 192.168.1.10:7677 start -spec session.json -wait
+```
+
+`remmote-ctl` speaks the same API the GUI will: `host` (what the daemon
+offers), `session`, `start`, `events`, `terminate`. The spec is JSON —
+the same shape as a saved connection profile:
+
+```json
+{
+  "source": "desktop",
+  "display": {"kind": "existing", "name": ":0"},
+  "stream": {"codec": "hybrid", "quality": 75, "resizeDesktop": true}
+}
+```
+
+`source` is `desktop`, `app` (with `app.command`) or `window` (with
+`window.id`); `display.kind` is `existing` or, when the daemon learns to
+make displays, `create`.
+
 ### Your own display (headless or nested)
 
 `-display` takes any X display, including one you start yourself — no
@@ -219,8 +263,10 @@ keyframe (2 s).
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-display` | `$DISPLAY` | X display to capture and control |
-| `-listen` | `:7677` | TCP listen address |
+| `-display` | `$DISPLAY` | X display to capture and control (the startup session) |
+| `-listen` | `:7677` | TCP listen address — the control API and the streams share it |
+| `-idle` | off | share nothing at startup; wait for a client to say what to share |
+| `-allow-exec` | — | comma-separated commands clients may launch (`source: app`); empty refuses them all. A session started from these flags is never restricted |
 | `-fps` | `60` | max frames/s (also the damage merge window) |
 | `-codec` | `hybrid` | `hybrid`, `zraw`, `jpeg` or `webp` (webp needs a `-tags webp` build) |
 | `-downscale` | `1` | divide stream width/height by 2 or 4 to reduce encoded pixels 4× or 16×; mouse coordinates are mapped back automatically |
@@ -461,11 +507,33 @@ Two things worth knowing before you rely on it:
 - **Keepalive**: the server pings every 10 s; both sides use 30 s read
   deadlines, so dead peers are reaped instead of hanging.
 
+## Control API (v1)
+
+Control is JSON over HTTP/1.1 on the same port as the stream (HTTPS with
+`-tls`), so the whole API is scriptable with `remmote-ctl` — or `curl`:
+
+| Request | Meaning |
+|---|---|
+| `GET /api/v1/host` | what this daemon can do: protocol version, codecs, TLS, whether it may create displays or launch apps, the running session |
+| `GET /api/v1/session` | the running session: state, spec in force, screen size, app pid, error and log tail (`404` when none) |
+| `POST /api/v1/session` | start a session from a JSON `SessionSpec` (`409` when one is running; `?replace=1` stops it first) |
+| `DELETE /api/v1/session` | terminate the session **and** the service |
+| `GET /api/v1/events` | SSE: state changes and log lines as the session starts and runs |
+| `POST /api/v1/attach` | `Upgrade: remmote` → `101 Switching Protocols`, then the raw stream below |
+
+A session is `starting`, `live` or `lost` (a session that failed to
+start keeps its error and log until replaced). `attach` waits for a
+session that is still starting rather than making every viewer time and
+retry — and it is what makes *detach* trivial: closing the viewer closes
+its connection, and the session carries on.
+
 ## Wire protocol (v4)
 
 TCP, big-endian, optionally wrapped in TLS (`-tls`). Frame:
 `'R' 'M' type flags length:u32 payload`
-(max payload 32 MiB). Client speaks first. v2 added the Clipboard
+(max payload 32 MiB). Client speaks first — but only after the attach
+upgrade above; the port serves the control API first and the stream to
+whoever asks for it. v2 added the Clipboard
 message; v3 added the ZRAW codec byte; v4 added the Resize request. The
 server refuses a mismatched `ClientHello.version`, so a v3 client now
 gets an explicit refusal instead of connecting and then having its
@@ -529,9 +597,12 @@ paints a known color and verifies client snapshots pixel-by-pixel.
 ### Layout
 
 ```
-cmd/remmote-server   host main
+cmd/remmote-server   daemon main: flags → startup session
 cmd/remmote-client   viewer main
+cmd/remmote-ctl      control API from the terminal
 internal/proto       wire protocol codec (+tests)
+internal/api         control API contract (SessionSpec) + client + stream upgrade
+internal/daemon      control API server, session lifecycle, SSE, terminate
 internal/xconn       X bootstrap, extension detection, screen facts
 internal/capture     SHM + damage + fallback capture (+tests)
 internal/encode      JPEG / ZRAW (zstd) / hybrid / WebP (tag webp) encoders

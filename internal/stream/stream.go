@@ -405,6 +405,15 @@ func (s *Stream) CodecName() string { return codecName(s.enc.Codec()) }
 // FPS reports the capture loop's frame cap.
 func (s *Stream) FPS() int { return s.src.FPS() }
 
+// AppPID reports the launched application's process group (0 when the
+// stream shares something that was already running).
+func (s *Stream) AppPID() int {
+	if s.proc == nil {
+		return 0
+	}
+	return s.proc.Pid()
+}
+
 // startClipboard launches the clipboard watcher: local copies are pushed
 // to every client; remote text becomes the host clipboard.
 func (s *Stream) startClipboard(ctx context.Context) {

@@ -68,9 +68,21 @@ if [ -z "$LISTENED" ]; then
 	grep -v authority "$LOG" | tail -5
 	exit 1
 fi
-SOURCE=$(grep -oE 'source=[0-9]+x[0-9]+' "$LOG" | tail -1)
+# The session says what it shares once the window has been found (the
+# full window-search budget may apply).
+SOURCE=""
+for _ in $(seq 1 100); do
+	SOURCE=$(grep -oE 'source=[0-9]+x[0-9]+' "$LOG" | tail -1 || true)
+	[ -n "$SOURCE" ] && break
+	sleep 0.2
+done
 echo "server listening ($SOURCE)"
 
+if [ -z "$SOURCE" ]; then
+	echo "FAIL: server never reported what it shares"
+	grep -v authority "$LOG" | tail -5
+	exit 1
+fi
 if [ "$SOURCE" = "source=1x1" ]; then
 	echo "FAIL: server captured no window after the launch process exited ($SOURCE)"
 	grep -v authority "$LOG" | tail -5

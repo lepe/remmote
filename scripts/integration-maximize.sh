@@ -58,6 +58,17 @@ run_case() {
 		grep -v authority "$LOG" | tail -6
 		exit 1
 	}
+	# The session starts asynchronously: wait until it is sharing before
+	# asserting which maximize path was taken.
+	for _ in $(seq 1 100); do
+		grep -q "msg=sharing" "$LOG" && break
+		sleep 0.2
+	done
+	grep -q "msg=sharing" "$LOG" || {
+		echo "FAIL [$name]: server never started sharing"
+		grep -v authority "$LOG" | tail -6
+		exit 1
+	}
 	# Asserting the path matters: without a WM the fallback resize would
 	# pass this test even if the EWMH request were broken.
 	grep -q "maximized window.*mode=$mode" "$LOG" || {

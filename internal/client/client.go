@@ -23,6 +23,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/image/webp"
 
+	"github.com/lepe/remmote/internal/api"
 	"github.com/lepe/remmote/internal/clipboard"
 	"github.com/lepe/remmote/internal/proto"
 	"github.com/lepe/remmote/internal/tlsutil"
@@ -574,9 +575,11 @@ func dial(ctx context.Context, opts Options, log *slog.Logger, attempt int) (net
 	if tc := tlsutil.TCP(conn); tc != nil {
 		_ = tc.SetNoDelay(true)
 	}
-	// Set before the handshake below: a peer that stalls mid-handshake is
-	// bounded by this deadline, not just the byte transfer.
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	// Set before the attach request and the handshake below: a peer that
+	// stalls mid-handshake is bounded by this deadline, not just the byte
+	// transfer. It also covers a session that is still starting — the
+	// daemon answers the attach as soon as the session is live.
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	unverified := false
 	if opts.TLS {
 		cfg, err := tlsutil.ClientConfig(opts.TLSValue)
@@ -601,6 +604,15 @@ func dial(ctx context.Context, opts Options, log *slog.Logger, attempt int) (net
 				"server", opts.ServerAddr)
 		}
 	}
+
+	// Control and stream share the daemon's one port: say which one this
+	// connection came for, and it is handed to the stream.
+	up, err := api.Upgrade(conn, opts.ServerAddr)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	conn = up
 
 	hello := &proto.ClientHello{Version: proto.ProtoVersion}
 	if err := proto.WriteMsg(conn, proto.MsgClientHello, 0, hello.Encode()); err != nil {

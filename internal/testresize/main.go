@@ -21,6 +21,7 @@ import (
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
 
+	"github.com/lepe/remmote/internal/api"
 	"github.com/lepe/remmote/internal/proto"
 )
 
@@ -91,6 +92,12 @@ func session(addr string, w, h int, wantResize, wantKeyframe bool, wait time.Dur
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(wait + 3*time.Second))
+	// The daemon serves control and stream on one port: ask for the stream.
+	up, err := api.Upgrade(conn, addr)
+	if err != nil {
+		return fmt.Errorf("attach %s: %w", addr, err)
+	}
+	conn = up
 	br := bufio.NewReader(conn)
 
 	if err := proto.WriteMsg(conn, proto.MsgClientHello, 0,

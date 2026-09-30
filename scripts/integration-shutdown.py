@@ -71,6 +71,10 @@ def stalled_client(send_hello):
         def peer():
             with listener.accept()[0] as conn:
                 conn.recv(4096)
+                # The daemon hands the stream over after an HTTP upgrade;
+                # a mock peer has to say the same thing first.
+                conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                             b"Upgrade: remmote\r\nConnection: Upgrade\r\n\r\n")
                 if send_hello:
                     hello = struct.pack(">HHHBBH", 3, 64, 64, 24, 75, 0)
                     conn.sendall(b"RM\x02\x00" + struct.pack(">I", len(hello)) + hello)
