@@ -14,6 +14,8 @@ import (
 
 	"github.com/lepe/remmote/internal/auth"
 	"github.com/lepe/remmote/internal/client"
+	"github.com/lepe/remmote/internal/hub"
+	"github.com/lepe/remmote/internal/profile"
 	"github.com/lepe/remmote/internal/tlsutil"
 )
 
@@ -38,9 +40,23 @@ func main() {
 	flag.CommandLine.Parse(tlsutil.NormalizeArgs(os.Args[1:]))
 
 	if *server == "" {
-		fmt.Fprintln(os.Stderr, "remmote-client: -server is required")
-		flag.Usage()
-		os.Exit(2)
+		// Nothing named: open the connection manager — the speed dial,
+		// the editor, and the panel for whatever is running.
+		log := newLogger(*verbose, *logJSON)
+		store, err := profile.Open("")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "remmote-client:", err)
+			os.Exit(1)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := hub.Run(ctx, hub.Options{Display: *display, Store: store, Log: log}); err != nil {
+			if ctx.Err() == nil {
+				log.Error("hub failed", "err", err)
+				os.Exit(1)
+			}
+		}
+		return
 	}
 	if *upscale != 1 && *upscale != 2 && *upscale != 4 {
 		fmt.Fprintln(os.Stderr, "remmote-client: -upscale must be 1, 2 or 4")

@@ -127,6 +127,15 @@ That's it — move the mouse over the window and type. Close the viewer
 window to disconnect (the client also auto-reconnects if the network
 drops).
 
+Or let the client ask: **`./bin/remmote-client` with no `-server` opens
+the connection manager** — a window with the connections you have saved,
+a form for what to share, and a panel for whatever is running right now.
+`Enter` connects; `e` edits; `n` makes a new one. Closing the viewer's
+window detaches and nothing more — the session goes on, and opening the
+viewer again picks it up. Stopping a session is a deliberate act on the
+panel, and it stops the daemon too. Connections are saved in
+`~/.config/remmote/profiles.d/` (one JSON file each, hand-editable).
+
 ### The daemon and its session
 
 `remmote-server` is a daemon, and the session lives in it — not in the
@@ -308,7 +317,7 @@ keyframe (2 s).
 | Flag | Default | Meaning |
 |---|---|---|
 | `-display` | `$DISPLAY` | X display for the viewer window |
-| `-server` | (required) | `host:port` |
+| `-server` | — | `host:port`; **omit it to open the connection manager** (saved connections, the options form, the session panel) |
 | `-quality` | `0` | JPEG/WebP quality 1-100; 0 = keep default. ZRAW remains lossless |
 | `-fast-scale` | off | use nearest-neighbor viewer scaling for lower CPU use, with rougher edges |
 | `-upscale` | `1` | magnify the stream by 1, 2 or 4 back to host resolution; match the server's `-downscale` so the canvas, window and pointer mapping use host coordinates |
@@ -666,7 +675,12 @@ cmd/remmote-client   viewer main
 cmd/remmote-ctl      control API from the terminal
 internal/proto       wire protocol codec (+tests)
 internal/api         control API contract (SessionSpec) + client + stream upgrade
+internal/auth        device identity: authority, pairing, roles, revocation
 internal/daemon      control API server, session lifecycle, SSE, terminate
+internal/hostenv     X displays the daemon creates: cookie, window manager, teardown
+internal/profile     the client's saved connections (speed dial)
+internal/ui          X11 widget layer: forms, lists, dialogs (no toolkit)
+internal/hub         the connection manager: speed dial, editor, session panel
 internal/xconn       X bootstrap, extension detection, screen facts
 internal/capture     SHM + damage + fallback capture (+tests)
 internal/encode      JPEG / ZRAW (zstd) / hybrid / WebP (tag webp) encoders
