@@ -38,6 +38,8 @@ var special = map[string]xproto.Keysym{
 	"Home":      0xff50,
 	"End":       0xff57,
 	"Space":     0x20,
+	"Alt_L":     0xffe9,
+	"Alt_R":     0xffea,
 	"Control_L": 0xffe3,
 	"Control_R": 0xffe4,
 	"Shift_L":   0xffe1,

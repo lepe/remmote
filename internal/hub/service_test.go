@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -117,6 +118,11 @@ func pairMux(t *testing.T, a *auth.Authority) *http.ServeMux {
 			Cert: string(certPEM), CA: string(a.CACertPEM()), Role: role,
 		})
 	})
+	// The host call is what a probe and a connection both begin with, so
+	// a test that reaches this server can tell that it reached it.
+	mux.HandleFunc("GET /api/v1/host", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(api.HostInfo{}) // nolint:errcheck // the test reads the error
+	})
 	return mux
 }
 
@@ -215,12 +221,8 @@ func TestUnencryptedPairingKeepsNothingToVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an unencrypted device could not be configured: %v", err)
 	}
-	if _, err := c.Host(context.Background()); err == nil {
-		// The pairing endpoint has no Host handler, so a refusal from the
-		// server means the request got there. Anything else means it did not.
-		if !strings.Contains(err.Error(), "404") {
-			t.Fatalf("an unencrypted device did not reach the host: %v", err)
-		}
+	if _, err := c.Host(context.Background()); err != nil {
+		t.Fatalf("an unencrypted device did not reach the host: %v", err)
 	}
 }
 
@@ -363,5 +365,70 @@ func TestUpdateDeviceRefusesWhatWouldNotWork(t *testing.T) {
 	}
 	if _, err := s.UpdateDevice("never-paired", Device{Name: "x", Server: "h:7677", Role: "view", Encrypted: true}); err == nil {
 		t.Fatal("a device that was never paired was updated")
+	}
+}
+
+// A host this machine paired is reached the way it was paired. When that
+// cannot be done the answer is an error, never a connection without the
+// credential or the certificate check — otherwise a record that cannot be
+// used would quietly become a less safe one.
+func TestAPairedHostIsNeverReachedWithoutItsCredential(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	authority, err := auth.Load(filepath.Join(home, "authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := pairServer(t, authority)
+	addr := srv.Listener.Addr().String()
+	code, err := authority.NewPairingCode(auth.RoleAdmin, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{}
+	rec, err := s.PairDevice("desk", addr, "control", code, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A record whose pin cannot be used: the credential is fine, the
+	// fingerprint is not.
+	broken := rec
+	broken.Fingerprint = "not-a-fingerprint"
+	list := []Device{broken}
+	raw, err := json.Marshal(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(devicesPath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = link(addr, "", "")
+	if err == nil {
+		t.Fatal("a paired host was reached although its record could not be used")
+	}
+	if strings.Contains(err.Error(), "not encrypted") ||
+		strings.Contains(err.Error(), "plain HTTP") {
+		t.Fatalf("the failure was reported as a fallback to no encryption: %v", err)
+	}
+
+	// And with a sound record the same host is reached again.
+	list = []Device{rec}
+	if raw, err = json.Marshal(list); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(devicesPath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, device, err := link(addr, "", "")
+	if err != nil {
+		t.Fatalf("a paired host could not be reached: %v", err)
+	}
+	if device != "desk" {
+		t.Fatalf("reached it as %q, want desk", device)
+	}
+	if _, err := c.Host(context.Background()); err != nil {
+		t.Fatalf("the host was not reachable once the record was sound: %v", err)
 	}
 }

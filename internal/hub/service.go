@@ -651,6 +651,14 @@ func (s *Service) Probe(server, tlsValue, named string) (ProbeResult, error) {
 // second result is the credential used — a person should not have to
 // remember which key opens which door.
 func link(server, tlsValue, named string) (*api.Client, string, error) {
+	// A host this machine paired is reached the way it was paired, and
+	// that is not negotiable here: a device whose record cannot be used is
+	// an error to report, never a reason to fall back to reaching the host
+	// without the credential or the check that pairing established.
+	if rec, ok := deviceRecordForServer(server, named); ok {
+		c, err := deviceClient(rec)
+		return c, rec.Credential, err
+	}
 	name := strings.TrimSpace(named)
 	if name == "" {
 		name = deviceFor(server, tlsValue)
@@ -660,12 +668,6 @@ func link(server, tlsValue, named string) (*api.Client, string, error) {
 		if err != nil {
 			return nil, name, err
 		}
-		// A credential this machine paired has a record of how it was
-		// paired: pinned and encrypted, or not encrypted at all.
-		if rec, ok := deviceForRecord(server, name); ok {
-			c, err := deviceClient(rec)
-			return c, name, err
-		}
 		c, err := api.NewClientIdentity(server, id)
 		return c, name, err
 	}
@@ -674,6 +676,27 @@ func link(server, tlsValue, named string) (*api.Client, string, error) {
 		return nil, "", err
 	}
 	return api.NewClient(server, cfg), "", nil
+}
+
+// deviceRecordForServer is the pairing record for a host — the one named
+// when a credential was asked for, and otherwise the record for that
+// address. ok is false when this machine has no record, which is the only
+// case where a host may be reached without one.
+func deviceRecordForServer(server, named string) (Device, bool) {
+	list, err := (&Service{}).Devices()
+	if err != nil {
+		return Device{}, false
+	}
+	want := strings.TrimSpace(named)
+	for _, rec := range list {
+		if rec.Server != server {
+			continue
+		}
+		if want == "" || rec.Credential == want {
+			return rec, true
+		}
+	}
+	return Device{}, false
 }
 
 // deviceClient reaches a host as one of the devices this machine paired

@@ -166,13 +166,79 @@ function fill(id, values) {
 
 // knownServers is where the server box gets its memory: every host a
 // saved connection already points at, newest use first.
+// knownServers is what the Device select is offered: the hosts this
+// machine is paired with, plus the one a connection may already name.
 function knownServers() {
   const seen = [];
+  for (const d of state.devices || []) {
+    if (d.server && seen.indexOf(d.server) < 0) seen.push(d.server);
+  }
   for (const p of state.profiles) {
     if (p.server && seen.indexOf(p.server) < 0) seen.push(p.server);
   }
-  if (!seen.length) seen.push("127.0.0.1:7677");
   return seen;
+}
+
+// fillDevices fills the Device select: every host this machine is paired
+// with, and "Other" last for one it is not paired with yet. The value is
+// the server address, since that is what a connection is about.
+function fillDevices(selected) {
+  const sel = $("e-host");
+  const keep = selected !== undefined ? selected : sel.value;
+  sel.innerHTML = "";
+  const first = document.createElement("option");
+  first.value = "";
+  first.textContent = (state.devices || []).length ? "choose a device" : "no devices yet";
+  sel.appendChild(first);
+  for (const d of state.devices || []) {
+    const opt = document.createElement("option");
+    opt.value = d.server;
+    opt.textContent = d.name || d.server;
+    opt.title = d.server;
+    sel.appendChild(opt);
+  }
+  const other = document.createElement("option");
+  other.value = "__other__";
+  other.textContent = "Other\u2026";
+  sel.appendChild(other);
+  for (const s of knownServers()) {
+    if (s && ![...sel.options].some((o) => o.value === s)) {
+      const opt = document.createElement("option");
+      opt.value = s;
+      opt.textContent = s;
+      sel.insertBefore(opt, other);
+    }
+  }
+  sel.value = [...sel.options].some((o) => o.value === keep) ? keep : "";
+}
+
+// deviceFor picks the record for a server, so a selection can be named.
+function deviceRecord(server) {
+  return (state.devices || []).find((d) => d.server === server);
+}
+
+// chooseDevice is what picking from the Device select does: fill in the
+// address and the name, or open the New device screen for a host this
+// machine is not paired with yet.
+async function chooseDevice() {
+  const v = $("e-host").value;
+  if (v === "__other__") {
+    // "Other" is not a server: it is a request for one. Keep what is
+    // already filled in, since coming back should not lose the draft.
+    // The form opens only once the list is loaded, so the two cannot
+    // both claim the tab.
+    state.editing = readDraft();
+    state.wantedDevice = true;
+    show("devices");
+    await refreshDevices();
+    if (state.wantedDevice) newDevice();
+    return;
+  }
+  state.wantedDevice = false;
+  $("e-server").value = v;
+  const d = deviceRecord(v);
+  if (d && d.name) $("e-name").value = d.name;
+  probe();
 }
 
 async function openEditor(name) {
@@ -181,9 +247,10 @@ async function openEditor(name) {
     state.editingName = name || "";
     $("editor-title").textContent = name ? "Edit connection" : "New connection";
     const d = state.editing;
-    fill("known-servers", knownServers());
     $("e-name").value = d.name || "";
     $("e-server").value = d.server || "";
+    await refreshDevices();
+    fillDevices(d.server || "");
     $("e-app").value = d.appCmd || "";
     $("e-window").value = d.windowID || "";
     $("e-maximize").checked = !!d.maximize;
@@ -447,7 +514,26 @@ async function saveDevice() {
         (rec.encrypted ? " (TLS encrypted and verified)" : " \u2014 not encrypted"));
     }
     await refreshDevices();
+    if (state.wantedDevice) returnToEditor(rec.server);
   } catch (err) { fail(err); }
+}
+
+// returnToEditor goes back to the connection that asked for a device.
+// server is the one to choose there — empty when the request was given
+// up on, and then the form is left as it was rather than half-changed.
+function returnToEditor(server) {
+  state.wantedDevice = false;
+  show("edit");
+  fillDevices(server || "");
+  const d = deviceRecord(server);
+  if (d) {
+    $("e-server").value = d.server;
+    if (d.name) $("e-name").value = d.name;
+    probe();
+  } else {
+    $("e-server").value = "";
+    probe();
+  }
 }
 
 /* ── wiring ─────────────────────────────────────────────────────── */
@@ -498,7 +584,11 @@ function connectButtons() {
   };
 
   $("btn-new-device").onclick = newDevice;
-  $("btn-device-cancel").onclick = () => { state.editingDevice = ""; showForm(false); };
+  $("btn-device-cancel").onclick = () => {
+    state.editingDevice = "";
+    showForm(false);
+    if (state.wantedDevice) returnToEditor("");
+  };
   $("btn-pair").onclick = saveDevice;
 
   for (const tab of document.querySelectorAll(".tab")) {
@@ -512,8 +602,7 @@ function connectButtons() {
   for (const el of document.querySelectorAll('input[name="source"], #e-displaykind, #e-createserver')) {
     el.onchange = shapeEditor;
   }
-  $("e-server").addEventListener("change", probe);
-  $("e-server").addEventListener("blur", probe);
+  $("e-host").onchange = chooseDevice;
 
   // The unsafe choice says what it costs, right where it is chosen.
   $("d-tls").onchange = () => {

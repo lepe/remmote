@@ -44,16 +44,20 @@
     <div class="panel form-panel">
     <h3 class="section-heading">Connection details</h3>
     <div class="grid">
+      <label for="e-host">Device</label>
+      <div class="row">
+        <select id="e-host">
+          <option value="">choose a device</option>
+        </select>
+        <span class="probe" id="e-probe">choose a device to begin</span>
+      </div>
+
       <label for="e-name">Name</label>
       <div class="row">
         <input id="e-name" placeholder="Workstation">
       </div>
-      <label for="e-server">Server address</label>
-      <div class="row">
-        <input id="e-server" list="known-servers" placeholder="host:7677" autocomplete="off">
-        <datalist id="known-servers"></datalist>
-        <span class="probe" id="e-probe">choose a server to begin</span>
-      </div>
+
+      <input type="hidden" id="e-server">
     </div>
 
     <fieldset id="e-rest" class="grid" disabled>

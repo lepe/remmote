@@ -26,11 +26,33 @@ function mkEl(id) {
   return el;
 }
 
+// A select holds options; setting its value is ignored unless one offers it.
+function mkSelect(id) {
+  const el = mkEl(id);
+  el.options = [];
+  el._value = "";
+  Object.defineProperty(el, "innerHTML", {
+    get: () => "", set: () => { el.options.length = 0; },
+  });
+  Object.defineProperty(el, "value", {
+    get: () => el._value,
+    set: (v) => { el._value = el.options.some((o) => o.value === v) ? v : ""; },
+  });
+  el.appendChild = (o) => el.options.push(o);
+  el.insertBefore = (o, ref) => {
+    const i = el.options.indexOf(ref);
+    if (i < 0) el.options.push(o); else el.options.splice(i, 0, o);
+    return o;
+  };
+  el.create = (value, text) => ({ value, textContent: text, title: "" });
+  return el;
+}
+
 const els = {};
-const byId = (id) => (els[id] ||= mkEl(id));
+const byId = (id) => (els[id] ||= (id === "e-host" ? mkSelect(id) : mkEl(id)));
 for (const id of ["devices", "devices-list-panel", "device-form", "btn-new-device", "btn-pair",
   "device-form-title", "d-name", "d-server", "d-role", "d-code", "d-code-row", "d-tls", "d-tls-warn",
-  "view-devices", "modal"]) byId(id);
+  "view-devices", "modal", "e-host", "e-name", "e-server", "e-probe", "e-rest"]) byId(id);
 
 const calls = [];
 const app = {
@@ -51,7 +73,7 @@ const sandbox = {
     getElementById: byId,
     querySelector: () => mkEl("q"),
     querySelectorAll: () => [],
-    createElement: (tag) => mkEl(tag),
+    createElement: (tag) => (tag === "option" ? { value: "", textContent: "", title: "" } : mkEl(tag)),
     addEventListener: () => {},
     activeElement: null,
   },
@@ -59,7 +81,7 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
-vm.runInContext(src + "\n;globalThis.__x = {state, editDevice, newDevice, saveDevice, refreshDevices, showForm};", sandbox);
+vm.runInContext(src + "\n;globalThis.__x = {state, editDevice, newDevice, saveDevice, refreshDevices, showForm, fillDevices, chooseDevice, knownServers, returnToEditor};", sandbox);
 const { editDevice, newDevice, saveDevice, refreshDevices, showForm, state } = sandbox.__x;
 let fails = 0;
 const ok = (cond, label) => { console.log((cond ? "  PASS " : "  FAIL ") + label); if (!cond) fails++; };
@@ -113,6 +135,56 @@ showForm((state.devices || []).length === 0);
 ok(byId("devices-list-panel").classList.contains("hidden") === true, "no devices: the list is hidden");
 ok(byId("device-form").classList.contains("hidden") === false, "no devices: the form is shown");
 ok(byId("btn-new-device").classList.contains("hidden") === true, "no devices: the button is hidden");
+
+// ── the connection editor's Device select ──────────────────────────
+const { fillDevices, chooseDevice, knownServers, returnToEditor } = sandbox.__x;
+await refreshDevices();
+
+// The select offers what this machine is paired with, and Other last.
+byId("e-host").value = "";
+fillDevices();
+ok(byId("e-host").options.length >= 3, "the Device select has options");
+ok(byId("e-host").options[0].value === "", "it starts with a placeholder");
+ok(byId("e-host").options[1].value === "127.0.0.1:7677", "the paired host is offered");
+ok(byId("e-host").options[1].textContent === "Workstation", "a device is shown by its name");
+ok(byId("e-host").options.some((o) => o.value === "__other__"), "Other is offered");
+ok(byId("e-host").options[byId("e-host").options.length - 1].value === "__other__", "Other is last");
+
+// Choosing one fills in the address and the name.
+byId("e-name").value = "";
+byId("e-host").value = "127.0.0.1:7677";
+chooseDevice();
+ok(byId("e-server").value === "127.0.0.1:7677", "choosing a device sets the server");
+ok(byId("e-name").value === "Workstation", "choosing a device fills in the name");
+ok(state.wantedDevice === false, "choosing an existing device does not ask for a new one");
+
+// Other asks for a device and keeps the draft.
+byId("e-name").value = "My connection";
+byId("e-host").value = "__other__";
+await chooseDevice();
+ok(state.wantedDevice === true, "Other asks for a device to be made");
+ok(byId("e-name").value === "My connection", "the draft is not lost on the way");
+
+// Coming back chooses the device just paired.
+await refreshDevices();
+returnToEditor("127.0.0.1:7677");
+ok(state.wantedDevice === false, "coming back clears the request");
+ok(byId("e-host").value === "127.0.0.1:7677", "coming back selects the device");
+ok(byId("e-name").value === "Workstation", "coming back names it after the device");
+
+// Giving up on the request leaves the form as it was.
+byId("e-name").value = "My connection";
+byId("e-host").value = "__other__";
+await chooseDevice();
+ok(state.wantedDevice === true, "Other asks again");
+returnToEditor("");
+ok(byId("e-host").value === "", "giving up selects nothing");
+ok(byId("e-name").value === "My connection", "giving up keeps the name that was typed");
+ok(byId("e-server").value === "", "giving up leaves no server behind");
+
+// A value that is not offered is not silently selected.
+fillDevices("nowhere:1");
+ok(byId("e-host").value === "", "an unknown address selects nothing");
 
 console.log(fails ? `\n${fails} FAILED` : "\nall passed");
 process.exit(fails ? 1 : 0);
