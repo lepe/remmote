@@ -44,11 +44,23 @@ shared secret), stdlib for TCP/TLS/JPEG/logging. The default build has
 
 ## Build
 
-Requires Go ≥ 1.22. Nothing else.
+Requires Go ≥ 1.22. Nothing else — the daemon, the CLI and the viewer
+are pure Go:
 
 ```sh
-make build          # → bin/remmote-server, bin/remmote-client (pure Go)
+make build          # → bin/remmote-server, bin/remmote-ctl, bin/remmote-client
 ```
+
+The connection manager is the one program with a window toolkit: it is a
+Wails app (HTML/CSS in a native webview), so it needs CGo and the
+webkit2gtk headers, and it builds separately:
+
+```sh
+sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev   # Debian/Ubuntu
+make build-hub    # → bin/remmote-hub (skipped politely when those are missing)
+```
+
+Everything else keeps building without them.
 
 ### Codecs
 
@@ -127,14 +139,16 @@ That's it — move the mouse over the window and type. Close the viewer
 window to disconnect (the client also auto-reconnects if the network
 drops).
 
-Or let the client ask: **`./bin/remmote-client` with no `-server` opens
-the connection manager** — a window with the connections you have saved,
-a form for what to share, and a panel for whatever is running right now.
-`Enter` connects; `e` edits; `n` makes a new one. Closing the viewer's
-window detaches and nothing more — the session goes on, and opening the
-viewer again picks it up. Stopping a session is a deliberate act on the
-panel, and it stops the daemon too. Connections are saved in
-`~/.config/remmote/profiles.d/` (one JSON file each, hand-editable).
+Or let the client ask: **`./bin/remmote-hub` opens the connection
+manager** — a window with the connections you have saved, a form for
+what to share, a panel for whatever is running right now, and the list
+of paired devices. `Enter` connects; `e` edits; `n` makes a new one.
+Closing the viewer's window detaches and nothing more — the session goes
+on, and opening the viewer again picks it up. Stopping a session is a
+deliberate act on the panel, and it stops the daemon too. Connections
+are saved in `~/.config/remmote/profiles.d/` (one JSON file each,
+hand-editable). (`remmote-client` with no `-server` launches the manager
+for you when it is installed.)
 
 ### The daemon and its session
 
@@ -671,16 +685,16 @@ paints a known color and verifies client snapshots pixel-by-pixel.
 
 ```
 cmd/remmote-server   daemon main: flags → startup session
-cmd/remmote-client   viewer main
+cmd/remmote-client   viewer main (no -server: opens remmote-hub)
 cmd/remmote-ctl      control API from the terminal
+cmd/remmote-hub      the connection manager (Wails + webkit2gtk; make build-hub)
 internal/proto       wire protocol codec (+tests)
 internal/api         control API contract (SessionSpec) + client + stream upgrade
 internal/auth        device identity: authority, pairing, roles, revocation
 internal/daemon      control API server, session lifecycle, SSE, terminate
 internal/hostenv     X displays the daemon creates: cookie, window manager, teardown
 internal/profile     the client's saved connections (speed dial)
-internal/ui          X11 widget layer: forms, lists, dialogs (no toolkit)
-internal/hub         the connection manager: speed dial, editor, session panel
+internal/hub         the connection manager: behaviour in Go, an HTML/CSS window over it
 internal/xconn       X bootstrap, extension detection, screen facts
 internal/capture     SHM + damage + fallback capture (+tests)
 internal/encode      JPEG / ZRAW (zstd) / hybrid / WebP (tag webp) encoders

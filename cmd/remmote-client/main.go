@@ -9,13 +9,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 
 	"github.com/lepe/remmote/internal/auth"
 	"github.com/lepe/remmote/internal/client"
-	"github.com/lepe/remmote/internal/hub"
-	"github.com/lepe/remmote/internal/profile"
 	"github.com/lepe/remmote/internal/tlsutil"
 )
 
@@ -40,23 +39,21 @@ func main() {
 	flag.CommandLine.Parse(tlsutil.NormalizeArgs(os.Args[1:]))
 
 	if *server == "" {
-		// Nothing named: open the connection manager — the speed dial,
-		// the editor, and the panel for whatever is running.
-		log := newLogger(*verbose, *logJSON)
-		store, err := profile.Open("")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "remmote-client:", err)
-			os.Exit(1)
-		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		if err := hub.Run(ctx, hub.Options{Display: *display, Store: store, Log: log}); err != nil {
-			if ctx.Err() == nil {
-				log.Error("hub failed", "err", err)
+		// Nothing named: the connection manager is the way in. It is its
+		// own program — it needs a webview — so run it when it is here,
+		// and say where it lives when it is not.
+		if path, err := exec.LookPath("remmote-hub"); err == nil {
+			cmd := exec.Command(path)
+			cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+			if err := cmd.Run(); err != nil {
 				os.Exit(1)
 			}
+			return
 		}
-		return
+		fmt.Fprintln(os.Stderr, "remmote-client: no -server named.")
+		fmt.Fprintln(os.Stderr, "The connection manager is remmote-hub (make build-hub);")
+		fmt.Fprintln(os.Stderr, "the viewer itself takes -server host:port.")
+		os.Exit(2)
 	}
 	if *upscale != 1 && *upscale != 2 && *upscale != 4 {
 		fmt.Fprintln(os.Stderr, "remmote-client: -upscale must be 1, 2 or 4")

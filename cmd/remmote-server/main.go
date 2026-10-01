@@ -95,31 +95,38 @@ func main() {
 
 	// The flags describe one session — what today's script calls "the
 	// configuration". They are the startup session unless -idle.
-	spec := api.SessionSpec{
-		Source:   api.SourceDesktop,
-		Display:  api.DisplaySpec{Kind: api.KindExisting, Name: *display},
-		Maximize: *maximize,
-		Stream: api.StreamSpec{
-			Codec:         *codec,
-			FPS:           *fps,
-			Quality:       *quality,
-			Downscale:     *downscale,
-			Refresh:       refresh.String(),
-			Clipboard:     boolPtr(!*noClipboard),
-			ResizeDesktop: *resizeDesk,
-		},
-	}
-	switch {
-	case *execCmd != "":
-		spec.Source = api.SourceApp
-		spec.App = &api.AppSpec{Command: *execCmd}
-	case *windowID != "":
-		spec.Source = api.SourceWindow
-		spec.Window = &api.WindowSpec{ID: *windowID}
-	}
-	if err := spec.Validate(); err != nil {
-		log.Error("bad options", "err", err)
-		os.Exit(2)
+	var spec api.SessionSpec
+	if !*idle || *dumpFrame != "" || *testInj {
+		if strings.TrimSpace(*display) == "" {
+			log.Error("no display named: set $DISPLAY, pass -display, or use -idle to share nothing at startup")
+			os.Exit(2)
+		}
+		spec = api.SessionSpec{
+			Source:   api.SourceDesktop,
+			Display:  api.DisplaySpec{Kind: api.KindExisting, Name: *display},
+			Maximize: *maximize,
+			Stream: api.StreamSpec{
+				Codec:         *codec,
+				FPS:           *fps,
+				Quality:       *quality,
+				Downscale:     *downscale,
+				Refresh:       refresh.String(),
+				Clipboard:     boolPtr(!*noClipboard),
+				ResizeDesktop: *resizeDesk,
+			},
+		}
+		switch {
+		case *execCmd != "":
+			spec.Source = api.SourceApp
+			spec.App = &api.AppSpec{Command: *execCmd}
+		case *windowID != "":
+			spec.Source = api.SourceWindow
+			spec.Window = &api.WindowSpec{ID: *windowID}
+		}
+		if err := spec.Validate(); err != nil {
+			log.Error("bad options", "err", err)
+			os.Exit(2)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

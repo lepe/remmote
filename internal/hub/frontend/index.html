@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>remmote</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header>
+  <h1>remmote</h1>
+  <nav>
+    <button class="tab active" data-view="list">Connections</button>
+    <button class="tab" data-view="devices">Devices</button>
+  </nav>
+  <span id="status" class="status"></span>
+</header>
+
+<main>
+  <!-- ── the speed dial ─────────────────────────────────────────── -->
+  <section class="view" id="view-list">
+    <div class="toolbar">
+      <button class="primary" id="btn-connect">Connect</button>
+      <button id="btn-new">New</button>
+      <button id="btn-edit">Edit</button>
+      <button class="ghost danger" id="btn-delete">Delete</button>
+    </div>
+    <div class="list" id="profiles"></div>
+    <p class="hint">Enter connects · E edits · N is new · Delete removes. Closing the
+      viewer window detaches — the session goes on.</p>
+  </section>
+
+  <!-- ── the editor ─────────────────────────────────────────────── -->
+  <section class="view hidden" id="view-edit">
+    <div class="grid">
+      <label>Name</label>   <input id="e-name" placeholder="Workstation">
+      <label>Server</label> <input id="e-server" placeholder="host:7677">
+      <label>Device</label> <input id="e-identity" placeholder="paired device name, or empty">
+
+      <label>Share</label>
+      <div class="row" id="e-source">
+        <label class="radio"><input type="radio" name="source" value="desktop"> desktop</label>
+        <label class="radio"><input type="radio" name="source" value="app"> app</label>
+        <label class="radio"><input type="radio" name="source" value="window"> window</label>
+      </div>
+
+      <div class="only-app grid">
+        <label>Command</label> <input id="e-app" placeholder="xcalc">
+      </div>
+      <div class="only-window grid">
+        <label>Window id</label> <input id="e-window" placeholder="0x3400007 (from xwininfo)">
+      </div>
+      <div class="not-desktop"><span></span>
+        <label class="check"><input type="checkbox" id="e-maximize"> maximize on the host screen</label>
+      </div>
+
+      <label>Display</label>
+      <div class="row">
+        <select id="e-displaykind">
+          <option value="existing">existing</option>
+          <option value="create">create</option>
+        </select>
+        <input id="e-displayname" class="only-existing" placeholder=":0">
+      </div>
+      <div class="only-create grid">
+        <label>Make</label>
+        <div class="row">
+          <select id="e-createserver">
+            <option value="xvfb">xvfb</option>
+            <option value="xephyr">xephyr</option>
+          </select>
+          <input id="e-createsize" placeholder="1280x800">
+        </div>
+        <label>Window manager</label>
+        <div class="row">
+          <input id="e-createwm" placeholder="openbox, or none">
+          <input id="e-createhost" class="only-xephyr" placeholder="host display :0">
+        </div>
+      </div>
+
+      <label>Codec</label>
+      <div class="row">
+        <select id="e-codec">
+          <option>hybrid</option><option>zraw</option><option>jpeg</option><option>webp</option>
+        </select>
+        <label class="inline">Quality <input id="e-quality" class="num" placeholder="75"></label>
+        <label class="inline">FPS <input id="e-fps" class="num" placeholder="60"></label>
+      </div>
+
+      <label>Downscale</label>
+      <div class="row">
+        <select id="e-downscale"><option>1</option><option>2</option><option>4</option></select>
+        <label class="check"><input type="checkbox" id="e-clipboard"> clipboard</label>
+        <label class="check"><input type="checkbox" id="e-resize"> let the viewer resize the host screen</label>
+      </div>
+
+      <label>Viewer</label>
+      <div class="row">
+        <label class="inline">Upscale <select id="e-upscale"><option>1</option><option>2</option><option>4</option></select></label>
+        <label class="check"><input type="checkbox" id="e-fast"> fast scaling</label>
+      </div>
+    </div>
+    <div class="toolbar">
+      <button class="primary" id="btn-save">Save</button>
+      <button id="btn-save-connect">Save &amp; connect</button>
+      <button id="btn-cancel">Cancel</button>
+    </div>
+    <p class="hint">The daemon decides what it allows; the session panel says why when it refuses.</p>
+  </section>
+
+  <!-- ── the session ────────────────────────────────────────────── -->
+  <section class="view hidden" id="view-session">
+    <div class="session-head">
+      <span class="dot" id="session-dot"></span>
+      <b id="session-state">…</b>
+      <span class="muted" id="session-detail"></span>
+    </div>
+    <div class="card" id="session-summary"></div>
+    <div class="toolbar">
+      <button class="primary" id="btn-viewer">Open viewer</button>
+      <button id="btn-detach">Detach viewer</button>
+      <button class="danger" id="btn-terminate">Terminate session</button>
+    </div>
+    <pre class="log" id="session-log"></pre>
+  </section>
+
+  <!-- ── devices ────────────────────────────────────────────────── -->
+  <section class="view hidden" id="view-devices">
+    <div class="grid">
+      <label>Server</label>   <input id="d-server" placeholder="host:7677">
+      <label>As device</label><input id="d-identity" placeholder="paired admin device, or empty">
+      <label>Or with</label>  <input id="d-tls" placeholder="-tls value when not paired yet">
+    </div>
+    <div class="toolbar">
+      <button id="btn-devices">List devices</button>
+      <button id="btn-paircode">New pairing code</button>
+    </div>
+    <div class="list" id="clients"></div>
+    <div class="toolbar">
+      <input id="d-name" placeholder="name for this machine">
+      <input id="d-code" placeholder="pairing code">
+      <button class="primary" id="btn-pair">Pair this machine</button>
+    </div>
+    <p class="hint">A pairing code is how a device gets its own credential — its key never
+      leaves that machine, and it can be revoked on its own.</p>
+  </section>
+</main>
+
+<!-- ── a question that needs answering ─────────────────────────── -->
+<div class="backdrop hidden" id="modal">
+  <div class="modal">
+    <h2 id="modal-title"></h2>
+    <p id="modal-body"></p>
+    <div class="toolbar right">
+      <button id="modal-cancel">Keep things as they are</button>
+      <button class="danger" id="modal-ok">Yes</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
