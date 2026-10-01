@@ -119,7 +119,7 @@ func (s *Service) Connect(name string) (api.SessionInfo, error) {
 	}
 	c, err := clientFor(p)
 	if err != nil {
-		return api.SessionInfo{}, err
+		return api.SessionInfo{}, explain(err, p.Server)
 	}
 
 	s.mu.Lock()
@@ -136,7 +136,7 @@ func (s *Service) Connect(name string) (api.SessionInfo, error) {
 	info, err := c.Session(ctx)
 	switch {
 	case err != nil:
-		return s.fail(err)
+		return s.fail(explain(err, p.Server))
 	case info != nil:
 		s.mu.Lock()
 		s.info = *info
@@ -147,7 +147,7 @@ func (s *Service) Connect(name string) (api.SessionInfo, error) {
 	}
 	started, err := c.Start(ctx, p.Spec, false)
 	if err != nil {
-		return s.fail(err)
+		return s.fail(explain(err, p.Server))
 	}
 	s.mu.Lock()
 	s.info = *started
@@ -326,21 +326,25 @@ func (s *Service) watch() {
 func (s *Service) Host(server, identityName, tlsValue string) (api.HostInfo, error) {
 	c, err := adHoc(server, identityName, tlsValue)
 	if err != nil {
-		return api.HostInfo{}, err
+		return api.HostInfo{}, explain(err, server)
 	}
 	h, err := c.Host(context.Background())
 	if err != nil {
-		return api.HostInfo{}, err
+		return api.HostInfo{}, explain(err, server)
 	}
 	return *h, nil
 }
 
 // Pair exchanges a pairing code for this machine's credential, and keeps
-// it where the other commands will find it.
+// it where the other commands will find it. It always speaks TLS: a
+// device with no credential yet has nothing to verify the daemon with
+// before this call — that is what the call establishes. A pinned value
+// is honoured; without one the link is encrypted but unverified, and the
+// certificate it gets back is what is checked from then on.
 func (s *Service) Pair(server, tlsValue, code, name string) (string, error) {
-	cfg, err := tlsValueConfig(tlsValue)
+	cfg, err := pairingConfig(tlsValue)
 	if err != nil {
-		return "", err
+		return "", explain(err, server)
 	}
 	c := api.NewClient(server, cfg)
 	keyPEM, csrPEM, err := auth.NewIdentity(name)
@@ -349,7 +353,7 @@ func (s *Service) Pair(server, tlsValue, code, name string) (string, error) {
 	}
 	id, err := c.Pair(context.Background(), code, name, keyPEM, csrPEM)
 	if err != nil {
-		return "", err
+		return "", explain(err, server)
 	}
 	if err := id.Save(auth.DefaultIdentityDir(name)); err != nil {
 		return "", err
@@ -361,11 +365,11 @@ func (s *Service) Pair(server, tlsValue, code, name string) (string, error) {
 func (s *Service) PairCode(server, identityName, tlsValue, role string) (string, error) {
 	c, err := adHoc(server, identityName, tlsValue)
 	if err != nil {
-		return "", err
+		return "", explain(err, server)
 	}
 	resp, err := c.PairCode(context.Background(), role, "")
 	if err != nil {
-		return "", err
+		return "", explain(err, server)
 	}
 	return resp.Code, nil
 }
@@ -374,18 +378,19 @@ func (s *Service) PairCode(server, identityName, tlsValue, role string) (string,
 func (s *Service) Clients(server, identityName, tlsValue string) ([]api.ClientInfo, error) {
 	c, err := adHoc(server, identityName, tlsValue)
 	if err != nil {
-		return nil, err
+		return nil, explain(err, server)
 	}
-	return c.Clients(context.Background())
+	list, err := c.Clients(context.Background())
+	return list, explain(err, server)
 }
 
 // Revoke withdraws one device's admission (an admin action).
 func (s *Service) Revoke(server, identityName, tlsValue, name string) error {
 	c, err := adHoc(server, identityName, tlsValue)
 	if err != nil {
-		return err
+		return explain(err, server)
 	}
-	return c.Revoke(context.Background(), name)
+	return explain(c.Revoke(context.Background(), name), server)
 }
 
 // --- helpers ---
@@ -434,4 +439,32 @@ func tlsValueConfig(value string) (*tls.Config, error) {
 		return nil, nil
 	}
 	return tlsutil.ClientConfig(value)
+}
+
+// pairingConfig is how a device with no credential yet talks to the
+// daemon: always TLS — pairing only exists where TLS does — verified
+// when a pin is given and encrypted-only before that. Empty means auto,
+// the same thing a bare -tls means on the command line.
+func pairingConfig(tlsValue string) (*tls.Config, error) {
+	if !tlsutil.On(tlsValue) {
+		tlsValue = "auto"
+	}
+	return tlsutil.ClientConfig(tlsValue)
+}
+
+// explain turns the transport's way of saying "wrong scheme" into
+// something a person can act on. Go's own wording ("Client sent an HTTP
+// request to an HTTPS server") is true and useless.
+func explain(err error, server string) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "Client sent an HTTP request to an HTTPS server"):
+		return fmt.Errorf("%s speaks HTTPS (it uses TLS): leave the -tls value empty for auto, or pin its certificate", server)
+	case strings.Contains(msg, "server gave HTTP response to HTTPS client"):
+		return fmt.Errorf("%s speaks plain HTTP: set the -tls value to off", server)
+	}
+	return err
 }

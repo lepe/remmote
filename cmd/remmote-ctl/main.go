@@ -65,6 +65,14 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Pairing is how a device gets its credential, and it only exists
+	// where TLS does: speak TLS whatever -tls says — auto when empty,
+	// since a device with nothing to verify yet is exactly the point of
+	// the call. The certificate that comes back is what is checked from
+	// then on.
+	if cmd == "pair" && !tlsutil.On(*useTLS) {
+		*useTLS = "auto"
+	}
 	c, err := clientFor(*server, *useTLS, *identity)
 	if err != nil {
 		fatal(err)
