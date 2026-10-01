@@ -2,42 +2,53 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>remmote</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 
 <header>
-  <h1>remmote</h1>
-  <nav>
-    <button class="tab active" data-view="list">Connections</button>
+  <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="3"/><path d="M8 21h8m-4-4v4M8 9h8m-3-3 3 3-3 3"/></svg></span><h1>remmote</h1></div>
+  <nav aria-label="Main navigation">
+    <button class="tab active" data-view="list" aria-current="page">Connections</button>
+    <button class="tab" data-view="session">Session</button>
     <button class="tab" data-view="devices">Devices</button>
   </nav>
-  <span id="status" class="status"></span>
+  <span id="status" class="status" role="status"></span>
 </header>
 
 <main>
   <!-- ── the speed dial ─────────────────────────────────────────── -->
   <section class="view" id="view-list">
-    <div class="toolbar">
+    <div class="page-heading">
+      <div><p class="eyebrow">Your workspace</p><h2>Connections</h2><p class="description">Your desktops and applications, one connection away.</p></div>
+      <button class="primary" id="btn-new"><span aria-hidden="true">＋</span> New connection</button>
+    </div>
+    <div class="panel connection-panel">
+      <div class="panel-heading"><h3>Saved connections <span class="count" id="profile-count">0</span></h3><span class="caption">Select a connection to get started</span></div>
+      <div class="list" id="profiles" role="listbox" aria-label="Saved connections" tabindex="0"></div>
+      <div class="toolbar connection-actions">
       <button class="primary" id="btn-connect">Connect</button>
-      <button id="btn-new">New</button>
       <button id="btn-edit">Edit</button>
       <button class="ghost danger" id="btn-delete">Delete</button>
+      <span class="caption action-hint">Double-click to connect</span>
+      </div>
     </div>
-    <div class="list" id="profiles"></div>
-    <p class="hint">Enter connects · E edits · N is new · Delete removes. Closing the
-      viewer window detaches — the session goes on.</p>
+    <div class="view-footer"><span>Closing the viewer keeps your session running.</span><span class="shortcuts"><kbd>↵</kbd> Connect <kbd>E</kbd> Edit <kbd>N</kbd> New</span></div>
   </section>
 
   <!-- ── the editor ─────────────────────────────────────────────── -->
   <section class="view hidden" id="view-edit">
+    <div class="page-heading"><div><p class="eyebrow">Connection settings</p><h2 id="editor-title">New connection</h2><p class="description">Choose a host and configure your remote workspace.</p></div></div>
+    <div class="panel form-panel">
+    <h3 class="section-heading">Connection details</h3>
     <div class="grid">
-      <label>Name</label>
+      <label for="e-name">Name</label>
       <div class="row">
         <input id="e-name" placeholder="Workstation">
       </div>
-      <label>Server</label>
+      <label for="e-server">Server address</label>
       <div class="row">
         <input id="e-server" list="known-servers" placeholder="host:7677" autocomplete="off">
         <datalist id="known-servers"></datalist>
@@ -46,57 +57,58 @@
     </div>
 
     <fieldset id="e-rest" class="grid" disabled>
-      <label>Share</label>
-      <div class="row" id="e-source">
-        <label class="radio"><input type="radio" name="source" value="desktop"> desktop</label>
-        <label class="radio"><input type="radio" name="source" value="app"> app</label>
-        <label class="radio"><input type="radio" name="source" value="window"> window</label>
+      <legend>Session preferences</legend>
+      <span class="field-label" id="source-label">Share</span>
+      <div class="row source-options" id="e-source" role="radiogroup" aria-labelledby="source-label">
+        <label class="radio"><input type="radio" name="source" value="desktop"> Desktop</label>
+        <label class="radio"><input type="radio" name="source" value="app"> Application</label>
+        <label class="radio"><input type="radio" name="source" value="window"> Window</label>
       </div>
 
       <div class="only-app grid">
-        <label>Command</label> <input id="e-app" placeholder="xcalc">
+        <label for="e-app">Command</label> <input id="e-app" placeholder="xcalc">
       </div>
       <div class="only-window grid">
-        <label>Window id</label> <input id="e-window" placeholder="0x3400007 (from xwininfo)">
+        <label for="e-window">Window ID</label> <input id="e-window" placeholder="0x3400007 (from xwininfo)">
       </div>
       <div class="not-desktop"><span></span>
         <label class="check"><input type="checkbox" id="e-maximize"> maximize on the host screen</label>
       </div>
 
-      <label>Display</label>
+      <label for="e-displaykind">Display</label>
       <div class="row">
         <select id="e-displaykind">
-          <option value="existing">existing</option>
-          <option value="create">create</option>
+          <option value="existing">Existing display</option>
+          <option value="create">Create a display</option>
         </select>
-        <input id="e-displayname" class="only-existing" list="host-displays" placeholder=":0">
+        <input id="e-displayname" class="only-existing" list="host-displays" placeholder=":0" aria-label="Display name">
         <datalist id="host-displays"></datalist>
       </div>
       <div class="only-create grid">
-        <label>Make</label>
+        <label for="e-createserver">Display server</label>
         <div class="row">
           <select id="e-createserver">
             <option value="xvfb">xvfb</option>
             <option value="xephyr">xephyr</option>
           </select>
-          <input id="e-createsize" placeholder="1280x800">
+          <input id="e-createsize" placeholder="1280x800" aria-label="Display resolution">
         </div>
-        <label>Window manager</label>
+        <label for="e-createwm">Window manager</label>
         <div class="row">
           <input id="e-createwm" list="host-wms" placeholder="openbox, or none">
           <datalist id="host-wms"></datalist>
-          <input id="e-createhost" class="only-xephyr" placeholder="host display :0">
+          <input id="e-createhost" class="only-xephyr" placeholder="host display :0" aria-label="Host display">
         </div>
       </div>
 
-      <label>Codec</label>
+      <label for="e-codec">Encoding</label>
       <div class="row">
         <select id="e-codec"></select>
         <label class="inline">Quality <input id="e-quality" class="num" placeholder="75"></label>
         <label class="inline">FPS <input id="e-fps" class="num" placeholder="60"></label>
       </div>
 
-      <label>Scale</label>
+      <label for="e-scale">Stream scale</label>
       <div class="row">
         <select id="e-scale">
           <option value="1">1:1 — full size</option>
@@ -107,24 +119,26 @@
         <label class="check"><input type="checkbox" id="e-resize"> let the viewer resize the host screen</label>
       </div>
 
-      <label>Viewer</label>
+      <span class="field-label">Viewer</span>
       <div class="row">
         <label class="check"><input type="checkbox" id="e-fast"> fast scaling</label>
         <span class="muted" id="e-device"></span>
       </div>
     </fieldset>
+    </div>
 
     <div class="toolbar">
-      <button class="primary" id="btn-save">Save</button>
+      <button class="primary" id="btn-save">Save connection</button>
       <button id="btn-save-connect">Save &amp; connect</button>
       <button id="btn-cancel">Cancel</button>
     </div>
-    <p class="hint">What the daemon allows shapes this form: its displays, its window managers, the
-      codecs it can encode with.</p>
+    <p class="hint">Available options update automatically when the host is connected.</p>
   </section>
 
   <!-- ── the session ────────────────────────────────────────────── -->
   <section class="view hidden" id="view-session">
+    <div class="page-heading"><div><p class="eyebrow">Remote workspace</p><h2>Session</h2><p class="description" id="session-name">View and manage your current session.</p></div></div>
+    <div class="panel session-panel">
     <div class="session-head">
       <span class="dot" id="session-dot"></span>
       <b id="session-state">…</b>
@@ -136,44 +150,55 @@
       <button id="btn-detach">Detach viewer</button>
       <button class="danger" id="btn-terminate">Terminate session</button>
     </div>
+    </div>
+    <div class="panel log-panel"><div class="panel-heading"><h3>Session activity</h3><span class="caption">Updates automatically</span></div>
     <pre class="log" id="session-log"></pre>
+    </div>
   </section>
 
   <!-- ── devices ────────────────────────────────────────────────── -->
   <section class="view hidden" id="view-devices">
+    <div class="page-heading"><div><p class="eyebrow">Access management</p><h2>Devices</h2><p class="description">Manage the devices that can connect to your host.</p></div></div>
+    <div class="panel form-panel">
+    <h3 class="section-heading">Host credentials</h3>
     <div class="grid">
-      <label>Server</label>   <input id="d-server" placeholder="host:7677">
-      <label>As device</label><input id="d-identity" placeholder="paired admin device, or empty">
-      <label>Or with</label>  <input id="d-tls" placeholder="empty = auto (TLS, not yet verified) · or a SHA256: pin">
+      <label for="d-server">Server address</label><input id="d-server" placeholder="host:7677">
+      <label for="d-identity">Admin device</label><input id="d-identity" placeholder="Paired admin device (optional)">
+      <label for="d-tls">TLS verification</label><input id="d-tls" placeholder="Auto (unverified TLS), or a SHA256: pin">
     </div>
     <div class="toolbar">
       <button id="btn-devices">List devices</button>
       <button id="btn-paircode">New pairing code</button>
     </div>
-    <div class="list" id="clients"></div>
-    <div class="toolbar">
-      <input id="d-name" placeholder="name for this machine">
-      <input id="d-code" placeholder="pairing code">
+    </div>
+    <div class="panel devices-panel"><div class="panel-heading"><h3>Paired devices</h3><span class="caption">Select a device to revoke access</span></div>
+    <div class="list" id="clients"><div class="empty"><strong>Manage access to your host</strong><p>Enter a server address to load its paired devices.</p></div></div>
+    </div>
+    <div class="panel form-panel pairing-panel"><h3 class="section-heading">Pair this machine</h3>
+    <div class="toolbar pairing-fields">
+      <label>Device name<input id="d-name" placeholder="e.g. Work laptop"></label>
+      <label>Pairing code<input id="d-code" placeholder="Enter pairing code"></label>
       <button class="primary" id="btn-pair">Pair this machine</button>
     </div>
     <p class="hint">A pairing code is how a device gets its own credential — its key never
       leaves that machine, and it can be revoked on its own.</p>
+    </div>
   </section>
 </main>
 
 <!-- ── a question that needs answering ─────────────────────────── -->
 <div class="backdrop hidden" id="modal">
-  <div class="modal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-body">
     <h2 id="modal-title"></h2>
     <p id="modal-body"></p>
     <div class="toolbar right">
-      <button id="modal-cancel">Keep things as they are</button>
+      <button id="modal-cancel">Cancel</button>
       <button class="danger" id="modal-ok">Yes</button>
     </div>
   </div>
 </div>
 
-<div class="toast hidden" id="toast"></div>
+<div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
 <script src="app.js"></script>
 </body>
 </html>

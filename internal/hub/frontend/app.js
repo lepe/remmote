@@ -6,6 +6,7 @@
 const api = () => window.go.hub.App;
 
 const $ = (id) => document.getElementById(id);
+const monitorIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>';
 const state = {
   profiles: [],
   selected: 0,
@@ -21,6 +22,8 @@ function show(view) {
   $("view-" + view).classList.remove("hidden");
   for (const tab of document.querySelectorAll(".tab")) {
     tab.classList.toggle("active", tab.dataset.view === view);
+    if (tab.dataset.view === view) tab.setAttribute("aria-current", "page");
+    else tab.removeAttribute("aria-current");
   }
 }
 
@@ -32,13 +35,21 @@ function toast(message) {
   el._t = setTimeout(() => el.classList.add("hidden"), 5000);
 }
 
+let modalTrigger;
+function closeModal() {
+  $("modal").classList.add("hidden");
+  modalTrigger?.focus();
+}
+
 function confirmAsk(title, body, okLabel, onOk) {
+  modalTrigger = document.activeElement;
   $("modal-title").textContent = title;
   $("modal-body").textContent = body;
   $("modal-ok").textContent = okLabel;
   $("modal").classList.remove("hidden");
-  $("modal-ok").onclick = () => { $("modal").classList.add("hidden"); onOk(); };
-  $("modal-cancel").onclick = () => $("modal").classList.add("hidden");
+  $("modal-ok").onclick = () => { closeModal(); onOk(); };
+  $("modal-cancel").onclick = closeModal;
+  $("modal-cancel").focus();
 }
 
 function fail(err) {
@@ -60,20 +71,33 @@ async function refreshProfiles() {
 function renderProfiles() {
   const box = $("profiles");
   box.innerHTML = "";
+  $("profile-count").textContent = state.profiles.length;
+  for (const id of ["btn-connect", "btn-edit", "btn-delete"]) {
+    $(id).disabled = !state.profiles.length;
+  }
+  box.removeAttribute("aria-activedescendant");
   if (!state.profiles.length) {
-    box.innerHTML = '<div class="empty">Nothing saved yet.<br>' +
-      "<b>New</b> makes a connection; it is saved for next time.</div>";
+    box.removeAttribute("role");
+    box.innerHTML = '<div class="empty"><span class="connection-icon">' + monitorIcon +
+      '</span><strong>Your workspace starts here</strong><p>Save a connection to quickly return to a remote desktop or application.</p>' +
+      '<button class="primary" id="btn-first-connection">Create a connection</button></div>';
+    $("btn-first-connection").onclick = () => openEditor(null);
     return;
   }
+  box.setAttribute("role", "listbox");
+  box.setAttribute("aria-activedescendant", "profile-" + state.selected);
   state.profiles.forEach((p, i) => {
     const row = document.createElement("div");
     row.className = "row-item" + (i === state.selected ? " selected" : "");
-    row.innerHTML =
-      '<span class="name"></span><span class="sub"></span><span class="tag"></span>';
+    row.id = "profile-" + i;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(i === state.selected));
+    row.innerHTML = '<span class="connection-icon">' + monitorIcon + '</span>' +
+      '<span class="connection-copy"><span class="name"></span><span class="sub"></span></span><span class="tag"></span>';
     row.querySelector(".name").textContent = p.name;
     row.querySelector(".sub").textContent = p.server + (p.identity ? " · " + p.identity : "");
     row.querySelector(".tag").textContent = p.source;
-    row.onclick = () => { state.selected = i; renderProfiles(); };
+    row.onclick = () => { state.selected = i; renderProfiles(); box.focus({preventScroll: true}); };
     row.ondblclick = () => connect(p.name);
     box.appendChild(row);
   });
@@ -86,6 +110,7 @@ function renderProfiles() {
 async function probe() {
   const server = $("e-server").value.trim();
   const rest = $("e-rest");
+  $("e-probe").className = "probe";
   if (!server) {
     rest.disabled = true;
     $("e-probe").textContent = "choose a server to begin";
@@ -95,11 +120,13 @@ async function probe() {
   try {
     const res = await api().Probe(server, "", "");
     rest.disabled = false;
+    $("e-probe").classList.add("ok");
     $("e-probe").textContent = "connected" + (res.device ? " as " + res.device : "");
     $("e-device").textContent = res.device ? "as " + res.device : "";
     applyHost(res.host);
   } catch (err) {
     rest.disabled = true;
+    $("e-probe").classList.add("error");
     $("e-probe").textContent = "cannot reach it";
     fail(err);
   }
@@ -151,6 +178,7 @@ async function openEditor(name) {
   try {
     state.editing = name ? await api().Edit(name) : await api().NewDraft();
     state.editingName = name || "";
+    $("editor-title").textContent = name ? "Edit connection" : "New connection";
     const d = state.editing;
     fill("known-servers", knownServers());
     $("e-name").value = d.name || "";
@@ -256,7 +284,8 @@ async function connect(name) {
 function renderSession(info) {
   const dot = $("session-dot");
   dot.className = "dot " + (info.state || "");
-  $("session-state").textContent = info.state || "…";
+  $("session-state").textContent = info.state || "No active session";
+  $("session-name").textContent = state.sessionName || "View and manage your current session.";
   const bits = [];
   if (info.display) bits.push(info.display + (info.width ? " " + info.width + "×" + info.height : ""));
   if (info.spec?.source) bits.push(info.spec.source + " · " + (info.spec.stream?.codec || ""));
@@ -268,8 +297,10 @@ function renderSession(info) {
   else if (info.state === "live") summary.push("The session is running on the host. Opening the viewer attaches to it;\n" +
     "closing the viewer window detaches and nothing more.");
   else if (info.state === "stopped") summary.push("Terminated: the session is gone and the daemon has stopped.");
+  else if (!info.state) summary.push("Choose a saved connection to start a remote session.");
   $("session-summary").textContent = summary.join("\n");
   $("btn-viewer").disabled = info.state !== "live";
+  $("btn-terminate").disabled = !info.state || info.state === "stopped";
 }
 
 function renderLog(lines) {
@@ -296,16 +327,20 @@ function deviceArgs() {
 }
 
 async function listClients() {
+  if (!$("d-server").value.trim()) return;
   try {
     const list = await api().Clients(...deviceArgs());
     const box = $("clients");
     box.innerHTML = "";
     if (!list.length) {
-      box.innerHTML = '<div class="empty">No devices are paired.</div>';
+      box.innerHTML = '<div class="empty"><strong>No paired devices</strong><p>Use a pairing code below to give this machine access.</p></div>';
       return;
     }
     for (const c of list) {
-      const row = document.createElement("div");
+      const row = document.createElement("button");
+      row.type = "button";
+      row.disabled = !!c.revoked;
+      row.setAttribute("aria-label", c.name + (c.revoked ? ", revoked" : ", " + c.role + ". Revoke access"));
       row.className = "row-item";
       row.innerHTML = '<span class="name"></span><span class="sub"></span><span class="tag"></span>';
       row.querySelector(".name").textContent = c.name;
@@ -390,6 +425,7 @@ function connectButtons() {
       show(tab.dataset.view);
       if (tab.dataset.view === "devices") listClients();
       if (tab.dataset.view === "list") refreshProfiles();
+      if (tab.dataset.view === "session") refreshSession();
     };
   }
   for (const el of document.querySelectorAll('input[name="source"], #e-displaykind, #e-createserver')) {
@@ -400,12 +436,20 @@ function connectButtons() {
 }
 
 window.addEventListener("keydown", (ev) => {
+  if (!$("modal").classList.contains("hidden")) {
+    if (ev.key === "Escape") { ev.preventDefault(); closeModal(); }
+    if (ev.key === "Tab") {
+      ev.preventDefault();
+      (document.activeElement === $("modal-cancel") ? $("modal-ok") : $("modal-cancel")).focus();
+    }
+    return;
+  }
   if (ev.key === "Escape") {
-    if (!$("modal").classList.contains("hidden")) { $("modal").classList.add("hidden"); return; }
     if (!$("view-edit").classList.contains("hidden") ||
         !$("view-session").classList.contains("hidden")) show("list");
     return;
   }
+  if (ev.ctrlKey || ev.metaKey || ev.altKey || /^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName)) return;
   if (!$("view-list").classList.contains("hidden")) {
     if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
       ev.preventDefault();
@@ -413,7 +457,9 @@ window.addEventListener("keydown", (ev) => {
       state.selected = Math.min(Math.max(state.selected + step, 0),
         Math.max(state.profiles.length - 1, 0));
       renderProfiles();
+      $("profile-" + state.selected)?.scrollIntoView({block: "nearest"});
     } else if (ev.key === "Enter") {
+      if (ev.target.closest("button")) return;
       const p = state.profiles[state.selected];
       if (p) connect(p.name);
     } else if (ev.key.toLowerCase() === "n") {
@@ -421,6 +467,8 @@ window.addEventListener("keydown", (ev) => {
     } else if (ev.key.toLowerCase() === "e") {
       const p = state.profiles[state.selected];
       if (p) openEditor(p.name);
+    } else if (ev.key === "Delete") {
+      $("btn-delete").click();
     }
   }
 });

@@ -59,7 +59,7 @@ func main() {
 		Height:           640,
 		MinWidth:         720,
 		MinHeight:        520,
-		BackgroundColour: &options.RGBA{R: 24, G: 26, B: 30, A: 255},
+		BackgroundColour: &options.RGBA{R: 20, G: 24, B: 31, A: 255},
 		AssetServer:      &assetserver.Options{Assets: hub.Assets},
 		OnStartup:        app.Startup,
 		OnShutdown:       app.Shutdown,
