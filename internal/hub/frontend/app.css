@@ -52,7 +52,10 @@ button.tab { position: relative; background: transparent; border: 0; border-radi
 button.tab:hover { background: #ffffff04; color: var(--fg); }
 button.tab.active { color: var(--accent); }
 .tab.active::after { content: ""; position: absolute; bottom: 0; left: 12px; right: 12px; height: 2px; background: var(--accent); }
-.status { margin-left: auto; color: var(--muted); font-size: 11px; max-width: 200px; overflow-wrap: anywhere; text-align: right; }
+/* The status is one sentence about what the hub is doing. It stays on
+   one line: a two-line status pushes the header taller and reads as two
+   thoughts. It gives up characters rather than the line. */
+.status { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .status:empty { display: none; }
 main { max-width: 1120px; margin: auto; padding: 28px; }
 .page-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
@@ -180,7 +183,7 @@ fieldset:disabled input, fieldset:disabled select { cursor: default; }
 @media (max-width: 760px) {
   header { gap: 18px; padding: 0 20px; min-height: 66px; }
   button.tab { padding: 0 8px; }
-  .status { max-width: 130px; font-size: 10px; }
+  .status { font-size: 10px; }
   main { padding: 22px 20px; }
   h2 { font-size: 24px; }
   .panel-heading > .caption, .action-hint { display: none; }
