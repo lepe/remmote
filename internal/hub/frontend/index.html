@@ -197,23 +197,27 @@
         <label for="d-code">Code</label>
         <input id="d-code" placeholder="the pairing code this host printed">
 
-        <label for="d-tls">TLS verification</label>
+        <label for="d-tls">Encryption</label>
         <div class="row">
           <select id="d-tls">
-            <option value="off">Disabled — encrypted, certificate not checked</option>
-            <option value="on" selected>Enabled — the host's certificate is checked</option>
+            <option value="on" selected>Enabled — TLS encrypted and verified</option>
+            <option value="off">Disabled — Unsafe, not encrypted</option>
           </select>
-          <span class="caption">checked from the first pairing onwards</span>
+          <span class="caption">verified against the certificate this pairing learns</span>
         </div>
+        <p class="warning hidden" id="d-tls-warn">Unsafe: nothing is encrypted. Anyone who can
+          see this network can watch the session, read what is typed, and type into it — and the
+          host cannot tell this machine apart from any other, so there is no device to name or
+          revoke. Use this only on a network you trust.</p>
       </div>
       <div class="toolbar">
         <button class="primary" id="btn-pair">Pair device</button>
         <button id="btn-device-cancel">Cancel</button>
       </div>
       <p class="hint">A pairing code is how a device gets its own credential — its key never
-        leaves that machine, and it can be revoked on its own. With TLS verification enabled
-        the host's certificate is remembered here at pairing and checked on every later
-        connection, so there is no fingerprint to read, copy or compare.</p>
+        leaves that machine, and it can be revoked on its own. With encryption on, the host's
+        certificate is remembered here at pairing and checked on every later connection, so
+        there is no fingerprint to read, copy or compare.</p>
     </div>
 
   </section>

@@ -60,17 +60,9 @@ func NewClientIdentity(addr string, id *auth.Identity) (*Client, error) {
 }
 
 // NewClientPinned is NewClientIdentity with the server's certificate
-// pinned to a fingerprint — the one pairing learned. fingerprint empty
-// means the device was paired without verification, so the certificate
-// is left unchecked.
+// pinned to the fingerprint pairing learned, so the connection is not
+// merely encrypted but checked against the one this device paired with.
 func NewClientPinned(addr string, id *auth.Identity, fingerprint string) (*Client, error) {
-	if fingerprint == "" {
-		cfg, err := id.InsecureTLSConfig(addr)
-		if err != nil {
-			return nil, err
-		}
-		return NewClient(addr, cfg), nil
-	}
 	cfg, err := id.TLSConfig(addr)
 	if err != nil {
 		return nil, err

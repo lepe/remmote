@@ -412,8 +412,8 @@ type Device struct {
 	Server      string    `json:"server"`                // host:port
 	Credential  string    `json:"credential"`            // the credential pairing made for it
 	Role        string    `json:"role"`                  // what it may do there: view, control or admin
-	Fingerprint string    `json:"fingerprint,omitempty"` // the host's certificate, pinned when Verify is set
-	Verify      bool      `json:"verify"`                // whether that certificate is checked on every connection
+	Encrypted   bool      `json:"encrypted"`             // whether the link is TLS at all — the unsafe option is none
+	Fingerprint string    `json:"fingerprint,omitempty"` // the host's certificate, when Encrypted is set
 	PairedAt    time.Time `json:"pairedAt"`
 }
 
@@ -437,13 +437,14 @@ func (s *Service) Devices() ([]Device, error) {
 // The credential it makes is named after the host, and its key never
 // leaves this machine.
 //
-// Trust is not something to type in. When verify is set, the host's
-// certificate is read off the pairing connection and kept, so every
-// later connection is checked against the same one — the pairing code is
-// what vouches for the first answer, and the certificate is what is
-// checked from then on. With verify off the certificate is left unchecked,
-// which is only sensible over a network you already trust.
-func (s *Service) PairDevice(name, server, role, code string, verify bool) (Device, error) {
+// Encryption is the only choice to make here, and it is not a question of
+// how much: the link is TLS and checked, or it is not encrypted at all.
+// With encryption on, the host's certificate is read off the pairing
+// connection and kept, so every later connection is checked against the
+// same one — the pairing code vouches for the first answer, and the
+// certificate is what is checked from then on. Nothing is typed in and
+// nothing is compared by eye: the fingerprint is generated here.
+func (s *Service) PairDevice(name, server, role, code string, encrypted bool) (Device, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return Device{}, fmt.Errorf("the device needs a name")
@@ -451,11 +452,16 @@ func (s *Service) PairDevice(name, server, role, code string, verify bool) (Devi
 	if strings.TrimSpace(server) == "" {
 		return Device{}, fmt.Errorf("the device needs a server address")
 	}
-	cfg, err := pairingConfig("")
-	if err != nil {
-		return Device{}, explain(err, server)
+	var c *api.Client
+	if encrypted {
+		cfg, err := pairingConfig("")
+		if err != nil {
+			return Device{}, explain(err, server)
+		}
+		c = api.NewClient(server, cfg)
+	} else {
+		c = api.NewClient(server, nil) // no TLS at all: the unsafe choice
 	}
-	c := api.NewClient(server, cfg)
 	keyPEM, csrPEM, err := auth.NewIdentity(name)
 	if err != nil {
 		return Device{}, err
@@ -468,11 +474,11 @@ func (s *Service) PairDevice(name, server, role, code string, verify bool) (Devi
 		return Device{}, err
 	}
 	rec := Device{Name: name, Server: server, Credential: name,
-		Role: id.Role, Verify: verify, PairedAt: time.Now()}
-	if verify {
+		Role: id.Role, Encrypted: encrypted, PairedAt: time.Now()}
+	if encrypted {
 		// The fingerprint is generated here and kept out of sight: it is
-		// an implementation of "check the certificate", not something a
-		// person has to read, copy or compare.
+		// how "verified" is implemented, not something a person has to
+		// read, copy or compare.
 		rec.Fingerprint, err = tlsutil.ServerFingerprint(server)
 		if err != nil {
 			return Device{}, fmt.Errorf("could not read %s's certificate to pin it: %w", server, err)
@@ -594,10 +600,12 @@ func link(server, tlsValue, named string) (*api.Client, string, error) {
 			return nil, name, err
 		}
 		// A credential this machine paired has a record of how it was
-		// paired: the host's certificate is pinned when the record says it
-		// was verified, and left unchecked when it was not.
-		pin := pinFor(server, name)
-		c, err := api.NewClientPinned(server, id, pin)
+		// paired: pinned and encrypted, or not encrypted at all.
+		if rec, ok := deviceForRecord(server, name); ok {
+			c, err := deviceClient(rec)
+			return c, name, err
+		}
+		c, err := api.NewClientIdentity(server, id)
 		return c, name, err
 	}
 	cfg, err := tlsValueConfig(tlsValue)
@@ -608,33 +616,34 @@ func link(server, tlsValue, named string) (*api.Client, string, error) {
 }
 
 // deviceClient reaches a host as one of the devices this machine paired
-// with it, the way that pairing said to.
+// with it, the way that pairing said to: pinned and encrypted, or not
+// encrypted at all. There is nothing in between, and the record cannot
+// say there is.
 func deviceClient(rec Device) (*api.Client, error) {
+	if !rec.Encrypted {
+		return api.NewClient(rec.Server, nil), nil
+	}
 	id, err := auth.LoadIdentity(auth.DefaultIdentityDir(rec.Credential))
 	if err != nil {
 		return nil, err
 	}
-	pin := ""
-	if rec.Verify {
-		pin = rec.Fingerprint
-	}
-	return api.NewClientPinned(rec.Server, id, pin)
+	return api.NewClientPinned(rec.Server, id, rec.Fingerprint)
 }
 
-// pinFor is the fingerprint a paired credential keeps for a host, and
-// empty when there is none to keep: either the host was never paired from
-// here, or it was paired with verification off.
-func pinFor(server, name string) string {
+// deviceForRecord is the pairing record for a credential, when there is
+// one: how this machine paired with that host, which is what says how to
+// reach it again.
+func deviceForRecord(server, name string) (Device, bool) {
 	list, err := (&Service{}).Devices()
 	if err != nil {
-		return ""
+		return Device{}, false
 	}
 	for _, rec := range list {
-		if rec.Credential == name && rec.Server == server && rec.Verify {
-			return rec.Fingerprint
+		if rec.Credential == name && rec.Server == server {
+			return rec, true
 		}
 	}
-	return ""
+	return Device{}, false
 }
 
 // deviceFor finds the credential a host accepts: the first of this
@@ -642,11 +651,22 @@ func pinFor(server, name string) string {
 // do the most is tried first.
 func deviceFor(server, tlsValue string) string {
 	for _, name := range credentialNames() {
-		id, err := auth.LoadIdentity(auth.DefaultIdentityDir(name))
-		if err != nil {
+		rec, ok := deviceForRecord(server, name)
+		if !ok {
+			id, err := auth.LoadIdentity(auth.DefaultIdentityDir(name))
+			if err != nil {
+				continue
+			}
+			c, err := api.NewClientIdentity(server, id)
+			if err != nil {
+				continue
+			}
+			if _, err := c.Host(context.Background()); err == nil {
+				return name
+			}
 			continue
 		}
-		c, err := api.NewClientPinned(server, id, pinFor(server, name))
+		c, err := deviceClient(rec)
 		if err != nil {
 			continue
 		}
@@ -742,9 +762,9 @@ func explain(err error, server string) error {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "Client sent an HTTP request to an HTTPS server"):
-		return fmt.Errorf("%s speaks HTTPS (it uses TLS): leave the -tls value empty for auto, or pin its certificate", server)
+		return fmt.Errorf("%s speaks HTTPS: turn Encryption on to reach it", server)
 	case strings.Contains(msg, "server gave HTTP response to HTTPS client"):
-		return fmt.Errorf("%s speaks plain HTTP: set the -tls value to off", server)
+		return fmt.Errorf("%s speaks plain HTTP: turn Encryption off to reach it", server)
 	}
 	return err
 }

@@ -366,10 +366,10 @@ function renderDevices(devices) {
     row.innerHTML = '<span class="name"></span><span class="sub"></span><span class="tag"></span>';
     row.querySelector(".name").textContent = d.name;
     row.querySelector(".sub").textContent =
-      d.server + (d.role ? " · " + d.role : "") + (d.verify ? " · TLS verified" : " · TLS unchecked");
-    row.querySelector(".tag").title = d.verify
-      ? "This host's certificate is checked on every connection"
-      : "This host's certificate is not checked";
+      d.server + (d.role ? " · " + d.role : "") + (d.encrypted ? " · encrypted" : " · not encrypted");
+    row.querySelector(".tag").title = d.encrypted
+      ? "TLS encrypted, and this host's certificate is checked on every connection"
+      : "Not encrypted: anyone who can see this network can see the session";
     row.querySelector(".tag").textContent = d.pairedAt ? when(d.pairedAt) : "paired";
     row.onclick = () => {
       confirmAsk("Revoke this device?", d.name +
@@ -394,7 +394,7 @@ async function pairDevice() {
     const rec = await api().PairDevice($("d-name").value, $("d-server").value,
       $("d-role").value, $("d-code").value, $("d-tls").value === "on");
     toast("paired \"" + rec.name + "\" with " + rec.server + " as " + rec.role +
-      (rec.verify ? " (TLS verified)" : ""));
+      (rec.encrypted ? " (TLS encrypted and verified)" : " — not encrypted"));
     for (const id of ["d-name", "d-server", "d-code"]) $(id).value = "";
     await refreshDevices();
   } catch (err) { fail(err); }
@@ -464,6 +464,11 @@ function connectButtons() {
   }
   $("e-server").addEventListener("change", probe);
   $("e-server").addEventListener("blur", probe);
+
+  // The unsafe choice says what it costs, right where it is chosen.
+  $("d-tls").onchange = () => {
+    $("d-tls-warn").classList.toggle("hidden", $("d-tls").value !== "off");
+  };
 }
 
 // Ctrl+1/2/3 switch tabs: the three views are the whole app, and a

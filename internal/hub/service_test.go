@@ -58,6 +58,17 @@ func TestExplainSaysWhatToDo(t *testing.T) {
 	}
 }
 
+// recordFor is the pairing record a test wants to look at: how the
+// service would reach that host again.
+func recordFor(t *testing.T, server, name string) Device {
+	t.Helper()
+	rec, ok := deviceForRecord(server, name)
+	if !ok {
+		t.Fatalf("no pairing record for %q at %s", name, server)
+	}
+	return rec
+}
+
 // pairServer is a daemon's pairing endpoint and nothing else: enough to
 // pair against a real authority over a real TLS connection.
 func pairServer(t *testing.T, a *auth.Authority) *httptest.Server {
@@ -70,6 +81,26 @@ func pairServer(t *testing.T, a *auth.Authority) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	srv := httptest.NewUnstartedServer(pairMux(t, a))
+	srv.TLS = cfg
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// plainPairServer is the same endpoint with no TLS at all, which is the
+// only kind of host the unsafe choice can reach.
+func plainPairServer(t *testing.T, a *auth.Authority) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(pairMux(t, a))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// pairMux is the pairing endpoint on its own, so both servers above can
+// serve it and only the transport differs.
+func pairMux(t *testing.T, a *auth.Authority) *http.ServeMux {
+	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/pair", func(w http.ResponseWriter, r *http.Request) {
 		var req api.PairRequest
@@ -86,18 +117,14 @@ func pairServer(t *testing.T, a *auth.Authority) *httptest.Server {
 			Cert: string(certPEM), CA: string(a.CACertPEM()), Role: role,
 		})
 	})
-	srv := httptest.NewUnstartedServer(mux)
-	srv.TLS = cfg
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
-	return srv
+	return mux
 }
 
-// Pairing with verification on keeps the host's certificate, and later
-// connections are pinned to it. The pin is generated during pairing —
-// never asked for — and a host answering with a different certificate is
-// refused in words a person can act on.
-func TestPairingPinsTheHostCertificateWhenVerifying(t *testing.T) {
+// Encryption on means TLS and the certificate checked: pairing keeps the
+// host's certificate, and later connections are pinned to it. The pin is
+// generated during pairing — never asked for — and a host answering with
+// a different certificate is refused in words a person can act on.
+func TestEncryptedPairingPinsTheHostCertificate(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", home)
 	authority, err := auth.Load(filepath.Join(home, "authority"))
@@ -122,10 +149,10 @@ func TestPairingPinsTheHostCertificateWhenVerifying(t *testing.T) {
 	if rec.Fingerprint != pin {
 		t.Fatalf("pinned %q, want %q", rec.Fingerprint, pin)
 	}
-	if !rec.Verify {
-		t.Fatal("the record does not say the certificate is checked")
+	if !rec.Encrypted {
+		t.Fatal("the record does not say the link is encrypted")
 	}
-	if got := pinFor(addr, "desk"); got != pin {
+	if got := recordFor(t, addr, "desk").Fingerprint; got != pin {
 		t.Fatalf("later connections would pin %q, want %q", got, pin)
 	}
 
@@ -152,16 +179,17 @@ func TestPairingPinsTheHostCertificateWhenVerifying(t *testing.T) {
 	}
 }
 
-// With verification off the certificate is not checked, and the record
-// says so: the encryption stays, the check does not.
-func TestPairingWithoutVerificationLeavesTheCertificateUnchecked(t *testing.T) {
+// Encryption off is not encryption of a weaker kind: there is none, and
+// nothing is pinned because there is no certificate to pin. The record
+// says so, and later connections go back over the same unencrypted path.
+func TestUnencryptedPairingKeepsNothingToVerify(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", home)
 	authority, err := auth.Load(filepath.Join(home, "authority"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := pairServer(t, authority)
+	srv := plainPairServer(t, authority)
 	addr := srv.Listener.Addr().String()
 	code, err := authority.NewPairingCode(auth.RoleAdmin, time.Minute)
 	if err != nil {
@@ -172,24 +200,67 @@ func TestPairingWithoutVerificationLeavesTheCertificateUnchecked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.Verify {
-		t.Fatal("the record claims the certificate is checked")
+	if rec.Encrypted {
+		t.Fatal("the record claims the link is encrypted")
 	}
 	if rec.Fingerprint != "" {
-		t.Fatalf("a fingerprint was kept although verification is off: %q", rec.Fingerprint)
+		t.Fatalf("a fingerprint was kept although there is no TLS: %q", rec.Fingerprint)
 	}
-	if got := pinFor(addr, "desk"); got != "" {
-		t.Fatalf("later connections would pin %q although verification is off", got)
+	if got := recordFor(t, addr, "desk").Fingerprint; got != "" {
+		t.Fatalf("later connections would pin %q although there is no TLS", got)
 	}
 
-	// And the connection is still made: unchecked is not the same as
-	// unusable. The authority's Host call is absent here, so a successful
-	// dial is all that is being claimed.
-	id, err := auth.LoadIdentity(auth.DefaultIdentityDir("desk"))
+	// And it reaches the host the way it was paired: unencrypted.
+	c, err := deviceClient(rec)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("an unencrypted device could not be configured: %v", err)
 	}
-	if _, err := api.NewClientPinned(addr, id, ""); err != nil {
-		t.Fatalf("an unverified device could not be configured: %v", err)
+	if _, err := c.Host(context.Background()); err == nil {
+		// The pairing endpoint has no Host handler, so a refusal from the
+		// server means the request got there. Anything else means it did not.
+		if !strings.Contains(err.Error(), "404") {
+			t.Fatalf("an unencrypted device did not reach the host: %v", err)
+		}
+	}
+}
+
+// Encryption on and encryption off are the only choices there are: there
+// is no "encrypted but not verified" left to select, because the
+// fingerprint is generated during pairing and kept. The same host paired
+// both ways produces two records that say so.
+func TestEncryptionIsEitherOnOrOff(t *testing.T) {
+	for _, tc := range []struct {
+		encrypted bool
+		wantPin   bool
+	}{
+		{encrypted: true, wantPin: true},
+		{encrypted: false, wantPin: false},
+	} {
+		home := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", home)
+		authority, err := auth.Load(filepath.Join(home, "authority"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var srv *httptest.Server
+		if tc.encrypted {
+			srv = pairServer(t, authority)
+		} else {
+			srv = plainPairServer(t, authority)
+		}
+		code, err := authority.NewPairingCode(auth.RoleAdmin, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err := (&Service{}).PairDevice("desk", srv.Listener.Addr().String(), "control", code, tc.encrypted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Encrypted != tc.encrypted {
+			t.Fatalf("encrypted=%v recorded as %v", tc.encrypted, rec.Encrypted)
+		}
+		if (rec.Fingerprint != "") != tc.wantPin {
+			t.Fatalf("encrypted=%v kept fingerprint %q", tc.encrypted, rec.Fingerprint)
+		}
 	}
 }
