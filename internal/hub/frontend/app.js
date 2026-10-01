@@ -329,9 +329,15 @@ async function refreshSession() {
 // devices, or the form to make one — which is what shows first when
 // there is nothing to list yet.
 function showDevices() {
-  const devices = state.devices || [];
-  $("devices-list-panel").style.display = devices.length ? "" : "none";
-  $("device-form").style.display = devices.length ? "none" : "";
+  showForm((state.devices || []).length === 0);
+}
+
+// showForm chooses between the list and the form that replaces it — and
+// the button that made the form would only be a button for itself.
+function showForm(on) {
+  $("devices-list-panel").style.display = on ? "none" : "";
+  $("device-form").style.display = on ? "" : "none";
+  $("btn-new-device").style.display = on ? "none" : "";
 }
 
 async function refreshDevices() {
@@ -360,8 +366,7 @@ function renderDevices(devices) {
     row.innerHTML = '<span class="name"></span><span class="sub"></span><span class="tag"></span>';
     row.querySelector(".name").textContent = d.name;
     row.querySelector(".sub").textContent =
-      d.server + (d.credential ? " · " + d.credential : "") +
-      (d.admin ? " · managed as " + d.admin : "");
+      d.server + (d.role ? " · " + d.role : "");
     row.querySelector(".tag").textContent = d.pairedAt ? when(d.pairedAt) : "paired";
     row.onclick = () => {
       confirmAsk("Revoke this device?", d.name +
@@ -384,9 +389,9 @@ function when(iso) {
 async function pairDevice() {
   try {
     const rec = await api().PairDevice($("d-name").value, $("d-server").value,
-      $("d-identity").value, $("d-tls").value, $("d-code").value);
-    toast("paired \"" + rec.name + "\" with " + rec.server);
-    for (const id of ["d-name", "d-server", "d-identity", "d-tls", "d-code"]) $(id).value = "";
+      $("d-role").value, $("d-code").value);
+    toast("paired \"" + rec.name + "\" with " + rec.server + " as " + rec.role);
+    for (const id of ["d-name", "d-server", "d-code"]) $(id).value = "";
     await refreshDevices();
   } catch (err) { fail(err); }
 }
@@ -438,11 +443,8 @@ function connectButtons() {
       });
   };
 
-  $("btn-new-device").onclick = () => {
-    $("devices-list-panel").style.display = "none";
-    $("device-form").style.display = "";
-  };
-  $("btn-device-cancel").onclick = showDevices;
+  $("btn-new-device").onclick = () => showForm(true);
+  $("btn-device-cancel").onclick = () => showForm(false);
   $("btn-pair").onclick = pairDevice;
 
   for (const tab of document.querySelectorAll(".tab")) {
@@ -464,8 +466,11 @@ function connectButtons() {
 // keyboard should reach all of them.
 function switchTab(ev) {
   if (!ev.ctrlKey || ev.altKey || ev.metaKey) return false;
+  // ev.key under a modifier is not always the digit; ev.code always is.
+  const n = ev.key >= "1" && ev.key <= "9" ? ev.key :
+    ((ev.code || "").match(/^Digit([1-9])$/) || [])[1];
   const views = { "1": "list", "2": "session", "3": "devices" };
-  const view = views[ev.key];
+  const view = views[n];
   if (!view) return false;
   ev.preventDefault();
   show(view);

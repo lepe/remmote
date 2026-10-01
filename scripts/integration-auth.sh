@@ -105,7 +105,7 @@ if PAIRC pair -name impostor -code "00000000" >"$SPEC/out" 2>&1; then
 fi
 
 echo "== pairing a second device as view only"
-CODE2=$(IDC operator pair-code -role view | grep -oE '[A-F0-9]{8}' | head -1 || true)
+CODE2=$(IDC operator pair-code -role view | grep -oE '[A-Z0-9]{16,24}' | head -1 || true)
 [ -n "$CODE2" ] || { echo "FAIL: no view pairing code came back"; exit 1; }
 PAIRC pair -name viewer -code "$CODE2" | grep -q 'as view' || {
 	echo "FAIL: the second device is not paired as view"

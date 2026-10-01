@@ -177,8 +177,8 @@ func (c *Client) Events(ctx context.Context) (<-chan Event, func(), error) {
 // Pair exchanges a pairing code for this device's certificate. The key
 // is what NewIdentity generated and what never leaves this machine; the
 // result is the identity to save and present from then on.
-func (c *Client) Pair(ctx context.Context, code, name string, keyPEM, csrPEM []byte) (*auth.Identity, error) {
-	body, err := json.Marshal(PairRequest{Code: code, Name: name, CSR: string(csrPEM)})
+func (c *Client) Pair(ctx context.Context, code, name, role string, keyPEM, csrPEM []byte) (*auth.Identity, error) {
+	body, err := json.Marshal(PairRequest{Code: code, Name: name, Role: role, CSR: string(csrPEM)})
 	if err != nil {
 		return nil, err
 	}

@@ -147,7 +147,8 @@ type Event struct {
 type PairRequest struct {
 	Code string `json:"code"`
 	Name string `json:"name"`
-	CSR  string `json:"csr"` // PEM certificate signing request
+	Role string `json:"role,omitempty"` // view, control or admin — never more than the code carries
+	CSR  string `json:"csr"`            // PEM certificate signing request
 }
 
 // PairResponse is what a freshly paired device keeps: its certificate,

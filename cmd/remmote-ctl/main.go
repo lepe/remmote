@@ -56,7 +56,7 @@ func main() {
 	follow := sub.Bool("follow", false, "stay attached until interrupted")
 	pairCode := sub.String("code", "", "the pairing code the operator passed on (pair)")
 	pairName := sub.String("name", "", "what to call this device (pair)")
-	pairRole := sub.String("role", "view", "role to pair the device into: view, control or admin (pair-code)")
+	pairRole := sub.String("role", "control", "role to pair the device into: view, control or admin (never more than the code carries)")
 	pairTTL := sub.String("ttl", "", "how long the pairing code lives, e.g. 10m (pair-code)")
 	sub.Usage = usage
 	sub.Parse(rest)
@@ -162,7 +162,7 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
-		id, err := c.Pair(ctx, *pairCode, *pairName, keyPEM, csrPEM)
+		id, err := c.Pair(ctx, *pairCode, *pairName, *pairRole, keyPEM, csrPEM)
 		if err != nil {
 			fatal(err)
 		}

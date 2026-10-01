@@ -5,6 +5,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,7 +38,7 @@ func TestPairingIssuesVerifiableIdentity(t *testing.T) {
 	if len(keyPEM) == 0 || len(csrPEM) == 0 {
 		t.Fatal("identity generation produced nothing")
 	}
-	certPEM, role, err := a.Pair(code, "laptop", csrPEM)
+	certPEM, role, err := a.Pair(code, "laptop", "", csrPEM)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func TestPairingIssuesVerifiableIdentity(t *testing.T) {
 	}
 
 	// A pairing code is single use.
-	if _, _, err := a.Pair(code, "second", mustCSR(t, "second")); err == nil {
+	if _, _, err := a.Pair(code, "second", "", mustCSR(t, "second")); err == nil {
 		t.Fatal("a pairing code was used twice")
 	}
 
@@ -92,7 +93,7 @@ func TestPairingIssuesVerifiableIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	phoneCSR := mustCSR(t, "phone")
-	phonePEM, role, err := a.Pair(code2, "phone", phoneCSR)
+	phonePEM, role, err := a.Pair(code2, "phone", "", phoneCSR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,6 +143,16 @@ func TestIdentityRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Seat the operator first: the first pair is always an administrator
+	// (see TestFirstPairIsAlwaysAdministrator), and this test is about
+	// a credential coming back off disk, not about the role.
+	boot, err := a.NewPairingCode(RoleAdmin, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Pair(boot, "operator", "", mustCSR(t, "operator")); err != nil {
+		t.Fatal(err)
+	}
 	code, err := a.NewPairingCode(RoleControl, time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +161,7 @@ func TestIdentityRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, _, err := a.Pair(code, "desk", csrPEM)
+	certPEM, _, err := a.Pair(code, "desk", "", csrPEM)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,4 +190,109 @@ func mustCSR(t *testing.T, name string) []byte {
 		t.Fatal(err)
 	}
 	return csr
+}
+
+// A code grants at most what it carries: a device cannot pair itself
+// into more than the operator's invitation allows.
+func TestPairingRoleIsCappedByTheCode(t *testing.T) {
+	dir := t.TempDir()
+	a, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A device asking for more than its code carries gets what the code
+	// carries — so pair an operator first, since the very first pair is
+	// always an administrator and would not show the cap at all.
+	boot, err := a.NewPairingCode(RoleAdmin, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Pair(boot, "operator", "", mustCSR(t, "operator")); err != nil {
+		t.Fatal(err)
+	}
+	code, err := a.NewPairingCode(RoleView, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, role, err := a.Pair(code, "greedy", RoleAdmin, mustCSR(t, "greedy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role != RoleView {
+		t.Fatalf("a view code granted %q", role)
+	}
+
+	// And the role asked for is the one granted, when the code carries it.
+	code, err = a.NewPairingCode(RoleAdmin, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, role, err = a.Pair(code, "modest", RoleControl, mustCSR(t, "modest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role != RoleControl {
+		t.Fatalf("asked for control, got %q", role)
+	}
+}
+
+// The code is something a person types: long enough to be unguessable,
+// and free of the letters and digits that look alike.
+func TestPairingCodeIsLongAndLegible(t *testing.T) {
+	a, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 32; i++ {
+		code, err := a.NewPairingCode(RoleControl, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(code) < 16 || len(code) > 24 {
+			t.Fatalf("code %q is %d characters, want 16..24", code, len(code))
+		}
+		for _, r := range code {
+			if !strings.ContainsRune("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", r) {
+				t.Fatalf("code %q has %q, which is not in the alphabet", code, r)
+			}
+		}
+		if seen[code] {
+			t.Fatalf("code %q was generated twice", code)
+		}
+		seen[code] = true
+	}
+}
+
+// The first device is always the administrator: it is the one that mints
+// the codes later devices are paired with, and asking for less would
+// leave the host able to admit nobody ever again.
+func TestFirstPairIsAlwaysAdministrator(t *testing.T) {
+	a, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := a.NewPairingCode(RoleAdmin, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, role, err := a.Pair(code, "operator", RoleView, mustCSR(t, "operator"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role != RoleAdmin {
+		t.Fatalf("the first device was paired as %q, want admin", role)
+	}
+
+	// A second device is capped by its code, as before.
+	code, err = a.NewPairingCode(RoleView, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, role, err = a.Pair(code, "viewer", RoleAdmin, mustCSR(t, "viewer")); err != nil {
+		t.Fatal(err)
+	}
+	if role != RoleView {
+		t.Fatalf("the second device was paired as %q, want view", role)
+	}
 }

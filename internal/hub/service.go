@@ -351,11 +351,10 @@ func (s *Service) Host(server, identityName, tlsValue string) (api.HostInfo, err
 // Pair exchanges a pairing code for this machine's credential, and keeps
 // it where the other commands will find it. It always speaks TLS: a
 // device with no credential yet has nothing to verify the daemon with
-// before this call — that is what the call establishes. A pinned value
-// is honoured; without one the link is encrypted but unverified, and the
-// certificate it gets back is what is checked from then on.
-func (s *Service) Pair(server, tlsValue, code, name string) (string, error) {
-	cfg, err := pairingConfig(tlsValue)
+// before this call — that is what the call establishes. The authority
+// that comes back is what every later connection is verified against.
+func (s *Service) Pair(server, role, code, name string) (string, error) {
+	cfg, err := pairingConfig("")
 	if err != nil {
 		return "", explain(err, server)
 	}
@@ -364,7 +363,7 @@ func (s *Service) Pair(server, tlsValue, code, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	id, err := c.Pair(context.Background(), code, name, keyPEM, csrPEM)
+	id, err := c.Pair(context.Background(), code, name, role, keyPEM, csrPEM)
 	if err != nil {
 		return "", explain(err, server)
 	}
@@ -409,11 +408,10 @@ func (s *Service) Revoke(server, identityName, tlsValue, name string) error {
 // Device is a host this machine is paired with: what it is called, where
 // it is, and the credentials used with it.
 type Device struct {
-	Name       string    `json:"name"`            // what the host is called
-	Server     string    `json:"server"`          // host:port
-	Credential string    `json:"credential"`      // the credential pairing made for it
-	Admin      string    `json:"admin,omitempty"` // the credential that manages it (optional)
-	TLS        string    `json:"tls,omitempty"`
+	Name       string    `json:"name"`       // what the host is called
+	Server     string    `json:"server"`     // host:port
+	Credential string    `json:"credential"` // the credential pairing made for it
+	Role       string    `json:"role"`       // what it may do there: view, control or admin
 	PairedAt   time.Time `json:"pairedAt"`
 }
 
@@ -435,8 +433,10 @@ func (s *Service) Devices() ([]Device, error) {
 
 // PairDevice pairs this machine with a host and keeps the record of it.
 // The credential it makes is named after the host, and its key never
-// leaves this machine.
-func (s *Service) PairDevice(name, server, admin, tlsValue, code string) (Device, error) {
+// leaves this machine. Trust is not something to type in: the host's
+// authority comes back with the credential and every later connection is
+// verified against it.
+func (s *Service) PairDevice(name, server, role, code string) (Device, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return Device{}, fmt.Errorf("the device needs a name")
@@ -444,7 +444,7 @@ func (s *Service) PairDevice(name, server, admin, tlsValue, code string) (Device
 	if strings.TrimSpace(server) == "" {
 		return Device{}, fmt.Errorf("the device needs a server address")
 	}
-	cfg, err := pairingConfig(tlsValue)
+	cfg, err := pairingConfig("")
 	if err != nil {
 		return Device{}, explain(err, server)
 	}
@@ -453,7 +453,7 @@ func (s *Service) PairDevice(name, server, admin, tlsValue, code string) (Device
 	if err != nil {
 		return Device{}, err
 	}
-	id, err := c.Pair(context.Background(), code, name, keyPEM, csrPEM)
+	id, err := c.Pair(context.Background(), code, name, role, keyPEM, csrPEM)
 	if err != nil {
 		return Device{}, explain(err, server)
 	}
@@ -461,7 +461,7 @@ func (s *Service) PairDevice(name, server, admin, tlsValue, code string) (Device
 		return Device{}, err
 	}
 	rec := Device{Name: name, Server: server, Credential: name,
-		Admin: strings.TrimSpace(admin), TLS: tlsValue, PairedAt: time.Now()}
+		Role: id.Role, PairedAt: time.Now()}
 	if err := s.saveDevice(rec); err != nil {
 		return Device{}, err
 	}
@@ -488,10 +488,10 @@ func (s *Service) RemoveDevice(name string) error {
 	if gone == nil {
 		return fmt.Errorf("no device named %q", name)
 	}
-	if gone.Admin != "" {
+	if auth.AtLeast(gone.Role, auth.RoleAdmin) {
 		// Best effort: a host that is offline keeps its side of the
 		// record until someone revokes it there.
-		if c, _, err := link(gone.Server, gone.TLS, gone.Admin); err == nil {
+		if c, _, err := link(gone.Server, "", gone.Credential); err == nil {
 			_ = c.Revoke(context.Background(), gone.Credential)
 		}
 	}

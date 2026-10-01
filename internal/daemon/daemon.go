@@ -266,7 +266,7 @@ func (d *Daemon) handlePair(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, "bad pairing request: %v", err)
 		return
 	}
-	certPEM, role, err := d.auth.Pair(req.Code, req.Name, []byte(req.CSR))
+	certPEM, role, err := d.auth.Pair(req.Code, req.Name, req.Role, []byte(req.CSR))
 	if err != nil {
 		d.log.Warn("pairing refused", "remote", r.RemoteAddr, "name", req.Name, "err", err)
 		apiError(w, http.StatusForbidden, "%v", err)
