@@ -170,13 +170,13 @@
     <div class="panel devices-panel hidden" id="devices-list-panel">
       <div class="panel-heading">
         <h3>Paired devices</h3>
-        <span class="caption">Select a device to revoke its access</span>
+        <span class="caption">Click to edit · right-click to revoke</span>
       </div>
       <div class="list" id="devices"></div>
     </div>
 
     <div class="panel form-panel" id="device-form">
-      <h3 class="section-heading">New device</h3>
+      <h3 class="section-heading" id="device-form-title">New device</h3>
       <div class="grid">
         <label for="d-name">Server name</label>
         <input id="d-name" placeholder="What this host is called, e.g. Workstation">
@@ -194,8 +194,10 @@
           <span class="caption">what this device may do on that host</span>
         </div>
 
-        <label for="d-code">Code</label>
-        <input id="d-code" placeholder="the pairing code this host printed">
+        <div class="grid" id="d-code-row">
+          <label for="d-code">Code</label>
+          <input id="d-code" placeholder="the pairing code this host printed">
+        </div>
 
         <label for="d-tls">Encryption</label>
         <div class="row">

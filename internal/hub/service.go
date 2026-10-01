@@ -473,8 +473,11 @@ func (s *Service) PairDevice(name, server, role, code string, encrypted bool) (D
 	if err := id.Save(auth.DefaultIdentityDir(name)); err != nil {
 		return Device{}, err
 	}
+	// UTC, so the record reads back exactly as it was written: the value
+	// in the store and the value handed back are the same instant, not
+	// two that differ by a clock reading only this process could see.
 	rec := Device{Name: name, Server: server, Credential: name,
-		Role: id.Role, Encrypted: encrypted, PairedAt: time.Now()}
+		Role: id.Role, Encrypted: encrypted, PairedAt: time.Now().UTC()}
 	if encrypted {
 		// The fingerprint is generated here and kept out of sight: it is
 		// how "verified" is implemented, not something a person has to
@@ -485,6 +488,62 @@ func (s *Service) PairDevice(name, server, role, code string, encrypted bool) (D
 		}
 	}
 	if err := s.saveDevice(rec); err != nil {
+		return Device{}, err
+	}
+	return rec, nil
+}
+
+// UpdateDevice saves an edited record. The label, the address and
+// whether the link is encrypted are what a person changes — the host
+// moves, the name stops fitting. The credential stays what pairing made:
+// it is a key on this machine, not a setting.
+//
+// The role is the record's own note about what this device was given. It
+// is not a grant: the host reads the role off the certificate and decides
+// on that, so editing the note here cannot give this machine anything the
+// host did not already sign for.
+func (s *Service) UpdateDevice(name string, rec Device) (Device, error) {
+	list, err := s.Devices()
+	if err != nil {
+		return Device{}, err
+	}
+	name = strings.TrimSpace(name)
+	rec.Name = strings.TrimSpace(rec.Name)
+	if rec.Name == "" {
+		return Device{}, fmt.Errorf("the device needs a name")
+	}
+	if strings.TrimSpace(rec.Server) == "" {
+		return Device{}, fmt.Errorf("the device needs a server address")
+	}
+	if !auth.Valid(rec.Role) {
+		return Device{}, fmt.Errorf("%q is not a role", rec.Role)
+	}
+	var found *Device
+	for i := range list {
+		if list[i].Name == name {
+			found = &list[i]
+			break
+		}
+	}
+	if found == nil {
+		return Device{}, fmt.Errorf("no device named %q", name)
+	}
+	rec.Credential = found.Credential // the key is not something to edit
+	rec.PairedAt = found.PairedAt
+	if rec.Encrypted {
+		if rec.Fingerprint == "" || rec.Server != found.Server {
+			// A different address may be a different machine, so the
+			// certificate is learned again rather than trusted from the
+			// record the address just contradicted.
+			if rec.Fingerprint, err = tlsutil.ServerFingerprint(rec.Server); err != nil {
+				return Device{}, fmt.Errorf("could not read %s's certificate to pin it: %w", rec.Server, err)
+			}
+		}
+	} else {
+		rec.Fingerprint = "" // no TLS, nothing to pin
+	}
+	*found = rec
+	if err := s.writeDevices(list); err != nil {
 		return Device{}, err
 	}
 	return rec, nil
@@ -510,9 +569,11 @@ func (s *Service) RemoveDevice(name string) error {
 	if gone == nil {
 		return fmt.Errorf("no device named %q", name)
 	}
-	if auth.AtLeast(gone.Role, auth.RoleAdmin) {
-		// Best effort: a host that is offline keeps its side of the
-		// record until someone revokes it there.
+	// Best effort, and decided by the credential rather than the
+	// record's note: a host that is offline keeps its side of the record
+	// until someone revokes it there.
+	if id, err := auth.LoadIdentity(auth.DefaultIdentityDir(gone.Credential)); err == nil &&
+		auth.AtLeast(id.Role, auth.RoleAdmin) {
 		if c, err := deviceClient(*gone); err == nil {
 			_ = c.Revoke(context.Background(), gone.Credential)
 		}

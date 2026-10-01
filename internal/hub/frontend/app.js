@@ -323,10 +323,8 @@ async function refreshSession() {
 
 /* ── devices ────────────────────────────────────────────────────── */
 
-// The list is what the tab shows; the form is what "+ New device" shows
-// — and what shows first when there is nothing to list yet.
 // showDevices decides what the Devices tab shows: the list of paired
-// devices, or the form to make one — which is what shows first when
+// devices, or the form that makes one — which is what shows first when
 // there is nothing to list yet.
 function showDevices() {
   showForm((state.devices || []).length === 0);
@@ -334,10 +332,15 @@ function showDevices() {
 
 // showForm chooses between the list and the form that replaces it — and
 // the button that made the form would only be a button for itself.
+//
+// Visibility is the "hidden" class and nothing else. These panels carry
+// that class in the markup, where it is display:none !important, so an
+// inline style can never win against it: setting style.display looked
+// like it hid things while the class kept them hidden forever.
 function showForm(on) {
-  $("devices-list-panel").style.display = on ? "none" : "";
-  $("device-form").style.display = on ? "" : "none";
-  $("btn-new-device").style.display = on ? "none" : "";
+  $("devices-list-panel").classList.toggle("hidden", on);
+  $("device-form").classList.toggle("hidden", !on);
+  $("btn-new-device").classList.toggle("hidden", on);
 }
 
 async function refreshDevices() {
@@ -371,7 +374,9 @@ function renderDevices(devices) {
       ? "TLS encrypted, and this host's certificate is checked on every connection"
       : "Not encrypted: anyone who can see this network can see the session";
     row.querySelector(".tag").textContent = d.pairedAt ? when(d.pairedAt) : "paired";
-    row.onclick = () => {
+    row.onclick = () => editDevice(d.name);
+    row.oncontextmenu = (ev) => {
+      ev.preventDefault();
       confirmAsk("Revoke this device?", d.name +
         " will no longer be able to connect to " + d.server + ".", "Revoke", async () => {
           try { await api().RemoveDevice(d.name); await refreshDevices(); }
@@ -389,13 +394,58 @@ function when(iso) {
   } catch (e) { return "paired"; }
 }
 
-async function pairDevice() {
+// editDevice opens the form with a device's values in it. A click is how
+// a row is opened and changed; revoking is the other thing one might do
+// to a row, and that is the right-click menu — removing a device is not
+// something to do by accident on the way to editing it.
+function editDevice(name) {
+  const d = (state.devices || []).find((x) => x.name === name);
+  if (!d) return;
+  state.editingDevice = name;
+  $("d-name").value = d.name;
+  $("d-server").value = d.server;
+  $("d-role").value = d.role || "control";
+  $("d-code").value = "";
+  $("d-tls").value = d.encrypted ? "on" : "off";
+  $("d-tls").dispatchEvent(new Event("change"));
+  $("d-code-row").classList.add("hidden");
+  $("device-form-title").textContent = "Edit device";
+  $("btn-pair").textContent = "Save device";
+  showForm(true);
+}
+
+// newDevice opens the same form empty, for a device this machine does not
+// have yet — which is the only case a pairing code is needed for.
+function newDevice() {
+  state.editingDevice = "";
+  for (const id of ["d-name", "d-server", "d-code"]) $(id).value = "";
+  $("d-role").value = "control";
+  $("d-tls").value = "on";
+  $("d-tls").dispatchEvent(new Event("change"));
+  $("d-code-row").classList.remove("hidden");
+  $("device-form-title").textContent = "New device";
+  $("btn-pair").textContent = "Pair device";
+  showForm(true);
+}
+
+// saveDevice is what the form's one button does: pair a device this
+// machine does not have, or save the changes to one it does.
+async function saveDevice() {
   try {
-    const rec = await api().PairDevice($("d-name").value, $("d-server").value,
-      $("d-role").value, $("d-code").value, $("d-tls").value === "on");
-    toast("paired \"" + rec.name + "\" with " + rec.server + " as " + rec.role +
-      (rec.encrypted ? " (TLS encrypted and verified)" : " — not encrypted"));
-    for (const id of ["d-name", "d-server", "d-code"]) $(id).value = "";
+    if (state.editingDevice) {
+      const d = (state.devices || []).find((x) => x.name === state.editingDevice);
+      const rec = await api().UpdateDevice(state.editingDevice, {
+        name: $("d-name").value, server: $("d-server").value,
+        role: $("d-role").value, encrypted: $("d-tls").value === "on",
+        fingerprint: d ? d.fingerprint : "",
+      });
+      toast("saved \"" + rec.name + "\" (" + rec.server + ")");
+    } else {
+      const rec = await api().PairDevice($("d-name").value, $("d-server").value,
+        $("d-role").value, $("d-code").value, $("d-tls").value === "on");
+      toast("paired \"" + rec.name + "\" with " + rec.server + " as " + rec.role +
+        (rec.encrypted ? " (TLS encrypted and verified)" : " \u2014 not encrypted"));
+    }
     await refreshDevices();
   } catch (err) { fail(err); }
 }
@@ -447,9 +497,9 @@ function connectButtons() {
       });
   };
 
-  $("btn-new-device").onclick = () => showForm(true);
-  $("btn-device-cancel").onclick = () => showForm(false);
-  $("btn-pair").onclick = pairDevice;
+  $("btn-new-device").onclick = newDevice;
+  $("btn-device-cancel").onclick = () => { state.editingDevice = ""; showForm(false); };
+  $("btn-pair").onclick = saveDevice;
 
   for (const tab of document.querySelectorAll(".tab")) {
     tab.onclick = () => {

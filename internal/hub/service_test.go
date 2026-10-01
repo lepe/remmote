@@ -264,3 +264,104 @@ func TestEncryptionIsEitherOnOrOff(t *testing.T) {
 		}
 	}
 }
+
+// A saved device can be changed and saved again: the label, the address
+// and whether the link is encrypted. The credential is not something to
+// edit — it is a key on this machine — and the role is a note, so it can
+// be corrected without the host being asked anything.
+func TestUpdateDeviceSavesTheChangesAndKeepsTheCredential(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	authority, err := auth.Load(filepath.Join(home, "authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := pairServer(t, authority)
+	code, err := authority.NewPairingCode(auth.RoleAdmin, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{}
+	orig, err := s.PairDevice("desk", srv.Listener.Addr().String(), "admin", code, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := s.UpdateDevice("desk", Device{
+		Name: "Laptop", Server: orig.Server, Role: "view", Encrypted: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Name != "Laptop" || rec.Role != "view" {
+		t.Fatalf("saved %q/%q, want Laptop/view", rec.Name, rec.Role)
+	}
+	if rec.Credential != orig.Credential {
+		t.Fatalf("the credential changed from %q to %q", orig.Credential, rec.Credential)
+	}
+	if !rec.PairedAt.Equal(orig.PairedAt) {
+		t.Fatalf("the pairing time changed from %v to %v", orig.PairedAt, rec.PairedAt)
+	}
+	if rec.Fingerprint != orig.Fingerprint {
+		t.Fatalf("the pin changed from %q to %q", orig.Fingerprint, rec.Fingerprint)
+	}
+
+	list, err := s.Devices()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Name != "Laptop" {
+		t.Fatalf("the store holds %+v, want one device named Laptop", list)
+	}
+
+	// Turning encryption off drops the pin, because there is nothing to
+	// check a certificate against when there is no certificate.
+	rec, err = s.UpdateDevice("Laptop", Device{
+		Name: "Laptop", Server: orig.Server, Role: "view", Encrypted: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Fingerprint != "" {
+		t.Fatalf("encryption off kept the pin %q", rec.Fingerprint)
+	}
+	if rec.Encrypted {
+		t.Fatal("the record still claims the link is encrypted")
+	}
+}
+
+// The things that would leave the store unusable are refused where they
+// are typed, not at the next connection.
+func TestUpdateDeviceRefusesWhatWouldNotWork(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	authority, err := auth.Load(filepath.Join(home, "authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := pairServer(t, authority)
+	code, err := authority.NewPairingCode(auth.RoleAdmin, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{}
+	if _, err := s.PairDevice("desk", srv.Listener.Addr().String(), "admin", code, true); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		what string
+		rec  Device
+	}{
+		{"no name", Device{Name: " ", Server: "h:7677", Role: "view", Encrypted: true}},
+		{"no server", Device{Name: "x", Server: "", Role: "view", Encrypted: true}},
+		{"a role that is not one", Device{Name: "x", Server: "h:7677", Role: "root", Encrypted: true}},
+	} {
+		if _, err := s.UpdateDevice("desk", tc.rec); err == nil {
+			t.Fatalf("%s was accepted", tc.what)
+		}
+	}
+	if _, err := s.UpdateDevice("never-paired", Device{Name: "x", Server: "h:7677", Role: "view", Encrypted: true}); err == nil {
+		t.Fatal("a device that was never paired was updated")
+	}
+}
