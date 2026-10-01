@@ -60,7 +60,11 @@ sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev   # Debian/Ubuntu
 make build-hub    # → bin/remmote-hub (skipped politely when those are missing)
 ```
 
-Everything else keeps building without them.
+Everything else keeps building without them. The Makefile puts every
+standard `pkgconfig` directory in front of `pkg-config`, because on some
+multiarch systems the `pkg-config` binary is built for another
+architecture and never looks in `/usr/lib/<triplet>/pkgconfig` — which
+hides perfectly installed libraries from both the check and cgo.
 
 ### Codecs
 
