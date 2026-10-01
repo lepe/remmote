@@ -424,6 +424,7 @@ func (d *Daemon) handleHost(w http.ResponseWriter, r *http.Request) {
 		Codecs:         api.Codecs(),
 		TLS:            d.opts.TLS,
 		CanCreate:      hostenv.Available(),
+		Displays:       hostenv.DisplayNames(),
 		WindowManagers: hostenv.WMs(),
 		AllowExec:      len(d.opts.AllowExec) > 0,
 	}

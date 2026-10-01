@@ -105,6 +105,7 @@ type HostInfo struct {
 	Codecs         []string     `json:"codecs"`         // what it can actually encode with
 	TLS            bool         `json:"tls"`            // the listener is encrypted
 	CanCreate      bool         `json:"canCreate"`      // it can create displays (Xvfb/Xephyr installed)
+	Displays       []string     `json:"displays"`       // displays that are up right now, e.g. ":0"
 	WindowManagers []string     `json:"windowManagers"` // window managers installed here, best first
 	AllowExec      bool         `json:"allowExec"`      // launching an app is permitted
 	Session        *SessionInfo `json:"session,omitempty"`

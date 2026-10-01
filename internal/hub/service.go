@@ -5,6 +5,9 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -28,6 +31,7 @@ type Service struct {
 	display string // the local display the viewer window opens on
 
 	mu         sync.Mutex
+	device     string // the credential this machine reached the host with
 	conn       *api.Client
 	info       api.SessionInfo
 	logs       []string
@@ -117,10 +121,13 @@ func (s *Service) Connect(name string) (api.SessionInfo, error) {
 	if err != nil {
 		return api.SessionInfo{}, err
 	}
-	c, err := clientFor(p)
+	c, device, err := link(p.Server, p.TLS, p.Identity)
 	if err != nil {
 		return api.SessionInfo{}, explain(err, p.Server)
 	}
+	s.mu.Lock()
+	s.device = device
+	s.mu.Unlock()
 
 	s.mu.Lock()
 	if s.watchStop != nil {
@@ -239,7 +246,11 @@ func (s *Service) OpenViewer(name string) error {
 		s.mu.Unlock()
 		return nil
 	}
-	cfg := tlsConfig(p)
+	cfg, err := viewerTLS(p, s.device)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.viewerStop, s.viewing = cancel, true
 	s.status = "viewer open — closing its window detaches"
@@ -324,7 +335,7 @@ func (s *Service) watch() {
 // Host asks a daemon what it can do, with the credentials named (a
 // paired device, or a -tls value).
 func (s *Service) Host(server, identityName, tlsValue string) (api.HostInfo, error) {
-	c, err := adHoc(server, identityName, tlsValue)
+	c, _, err := link(server, tlsValue, identityName)
 	if err != nil {
 		return api.HostInfo{}, explain(err, server)
 	}
@@ -363,7 +374,7 @@ func (s *Service) Pair(server, tlsValue, code, name string) (string, error) {
 
 // PairCode mints an invitation to a role (an admin action).
 func (s *Service) PairCode(server, identityName, tlsValue, role string) (string, error) {
-	c, err := adHoc(server, identityName, tlsValue)
+	c, _, err := link(server, tlsValue, identityName)
 	if err != nil {
 		return "", explain(err, server)
 	}
@@ -376,7 +387,7 @@ func (s *Service) PairCode(server, identityName, tlsValue, role string) (string,
 
 // Clients lists the devices a daemon has paired (an admin action).
 func (s *Service) Clients(server, identityName, tlsValue string) ([]api.ClientInfo, error) {
-	c, err := adHoc(server, identityName, tlsValue)
+	c, _, err := link(server, tlsValue, identityName)
 	if err != nil {
 		return nil, explain(err, server)
 	}
@@ -386,51 +397,139 @@ func (s *Service) Clients(server, identityName, tlsValue string) ([]api.ClientIn
 
 // Revoke withdraws one device's admission (an admin action).
 func (s *Service) Revoke(server, identityName, tlsValue, name string) error {
-	c, err := adHoc(server, identityName, tlsValue)
+	c, _, err := link(server, tlsValue, identityName)
 	if err != nil {
 		return explain(err, server)
 	}
 	return explain(c.Revoke(context.Background(), name), server)
 }
 
+// ProbeResult is what reaching a host tells you: what it offers, and
+// which of this machine's credentials it accepted ("" when it wanted
+// none).
+type ProbeResult struct {
+	Host   api.HostInfo `json:"host"`
+	Device string       `json:"device"`
+}
+
+// Probe reaches a host and reports what it offers. Everything else in
+// the editor waits on this: a form full of choices the host cannot
+// honour is worse than no form.
+func (s *Service) Probe(server, tlsValue, named string) (ProbeResult, error) {
+	c, device, err := link(server, tlsValue, named)
+	if err != nil {
+		return ProbeResult{}, explain(err, server)
+	}
+	h, err := c.Host(context.Background())
+	if err != nil {
+		return ProbeResult{}, explain(err, server)
+	}
+	s.mu.Lock()
+	s.device = device
+	s.mu.Unlock()
+	return ProbeResult{Host: *h, Device: device}, nil
+}
+
 // --- helpers ---
 
-// adHoc builds a control client for one call: a paired device when one
-// is named, and with a -tls value otherwise.
-func adHoc(server, identityName, tlsValue string) (*api.Client, error) {
-	if strings.TrimSpace(identityName) != "" {
-		id, err := auth.LoadIdentity(auth.DefaultIdentityDir(identityName))
+// link builds the control client for a host: this machine's own
+// credential when the host wants one, and the -tls value otherwise. The
+// second result is the credential used — a person should not have to
+// remember which key opens which door.
+func link(server, tlsValue, named string) (*api.Client, string, error) {
+	name := strings.TrimSpace(named)
+	if name == "" {
+		name = deviceFor(server, tlsValue)
+	}
+	if name != "" {
+		id, err := auth.LoadIdentity(auth.DefaultIdentityDir(name))
 		if err != nil {
-			return nil, err
+			return nil, name, err
 		}
-		return api.NewClientIdentity(server, id)
+		c, err := api.NewClientIdentity(server, id)
+		return c, name, err
 	}
 	cfg, err := tlsValueConfig(tlsValue)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return api.NewClient(server, cfg), nil
+	return api.NewClient(server, cfg), "", nil
 }
 
-// clientFor builds the control client a profile needs.
-func clientFor(p profile.Profile) (*api.Client, error) {
-	if strings.TrimSpace(p.Identity) != "" {
-		id, err := auth.LoadIdentity(auth.DefaultIdentityDir(p.Identity))
+// deviceFor finds the credential a host accepts: the first of this
+// machine's that it admits. Credentials are ordered so the one that can
+// do the most is tried first.
+func deviceFor(server, tlsValue string) string {
+	for _, name := range credentialNames() {
+		id, err := auth.LoadIdentity(auth.DefaultIdentityDir(name))
 		if err != nil {
-			return nil, err
+			continue
 		}
-		return api.NewClientIdentity(p.Server, id)
+		c, err := api.NewClientIdentity(server, id)
+		if err != nil {
+			continue
+		}
+		if _, err := c.Host(context.Background()); err == nil {
+			return name
+		}
 	}
-	return api.NewClient(p.Server, tlsConfig(p)), nil
+	return ""
 }
 
-// tlsConfig is the -tls half of a profile's link (nil = plaintext).
-func tlsConfig(p profile.Profile) *tls.Config {
-	cfg, err := tlsValueConfig(p.TLS)
+// credentialNames lists this machine's paired devices, the most capable
+// first (admin before control before view).
+func credentialNames() []string {
+	entries, err := os.ReadDir(filepath.Join(auth.ConfigHome(), "credentials"))
 	if err != nil {
 		return nil
 	}
-	return cfg
+	type candidate struct {
+		name string
+		rank int
+	}
+	var list []candidate
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id, err := auth.LoadIdentity(auth.DefaultIdentityDir(e.Name()))
+		if err != nil {
+			continue
+		}
+		list = append(list, candidate{name: e.Name(), rank: roleRank(id.Role)})
+	}
+	sort.SliceStable(list, func(i, j int) bool { return list[i].rank > list[j].rank })
+	out := make([]string, 0, len(list))
+	for _, c := range list {
+		out = append(out, c.name)
+	}
+	return out
+}
+
+// viewerTLS is the link the viewer window opens with: the credential the
+// host accepted, or the profile's -tls value when it wanted none.
+func viewerTLS(p profile.Profile, device string) (*tls.Config, error) {
+	if device != "" {
+		id, err := auth.LoadIdentity(auth.DefaultIdentityDir(device))
+		if err != nil {
+			return nil, err
+		}
+		return id.TLSConfig(p.Server)
+	}
+	return tlsValueConfig(p.TLS)
+}
+
+// roleRank is what a role can do, as a number.
+func roleRank(role string) int {
+	switch role {
+	case auth.RoleAdmin:
+		return 3
+	case auth.RoleControl:
+		return 2
+	case auth.RoleView:
+		return 1
+	}
+	return 0
 }
 
 // tlsValueConfig turns a -tls value into a client config.

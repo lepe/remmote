@@ -81,36 +81,103 @@ function renderProfiles() {
 
 /* ── the editor ─────────────────────────────────────────────────── */
 
+// The form waits for the host: a list of displays it does not have, or
+// window managers it never installed, is worse than no list at all.
+async function probe() {
+  const server = $("e-server").value.trim();
+  const rest = $("e-rest");
+  if (!server) {
+    rest.disabled = true;
+    $("e-probe").textContent = "choose a server to begin";
+    return;
+  }
+  $("e-probe").textContent = "connecting…";
+  try {
+    const res = await api().Probe(server, "", "");
+    rest.disabled = false;
+    $("e-probe").textContent = "connected" + (res.device ? " as " + res.device : "");
+    $("e-device").textContent = res.device ? "as " + res.device : "";
+    applyHost(res.host);
+  } catch (err) {
+    rest.disabled = true;
+    $("e-probe").textContent = "cannot reach it";
+    fail(err);
+  }
+}
+
+// applyHost fills the choices only the host can answer: which displays
+// exist, which codecs it encodes with, which window managers it has.
+function applyHost(host) {
+  fill("host-displays", (host.displays || []).map((d) => d));
+  fill("host-wms", host.windowManagers || []);
+  const codec = $("e-codec");
+  const wanted = codec.value || "hybrid";
+  codec.innerHTML = "";
+  for (const name of (host.codecs || ["hybrid"])) {
+    const opt = document.createElement("option");
+    opt.textContent = name;
+    codec.appendChild(opt);
+  }
+  codec.value = (host.codecs || []).indexOf(wanted) >= 0 ? wanted : (host.codecs || ["hybrid"])[0];
+  $("e-displaykind").querySelector('option[value="create"]').disabled = !host.canCreate;
+  if (!host.canCreate && $("e-displaykind").value === "create") {
+    $("e-displaykind").value = "existing";
+    shapeEditor();
+  }
+}
+
+function fill(id, values) {
+  const box = $(id);
+  box.innerHTML = "";
+  for (const v of values) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    box.appendChild(opt);
+  }
+}
+
+// knownServers is where the server box gets its memory: every host a
+// saved connection already points at, newest use first.
+function knownServers() {
+  const seen = [];
+  for (const p of state.profiles) {
+    if (p.server && seen.indexOf(p.server) < 0) seen.push(p.server);
+  }
+  if (!seen.length) seen.push("127.0.0.1:7677");
+  return seen;
+}
+
 async function openEditor(name) {
   try {
     state.editing = name ? await api().Edit(name) : await api().NewDraft();
     state.editingName = name || "";
     const d = state.editing;
-    $("e-name").value = d.Name || "";
-    $("e-server").value = d.Server || "";
-    $("e-identity").value = d.Identity || "";
-    $("e-app").value = d.AppCmd || "";
-    $("e-window").value = d.WindowID || "";
-    $("e-maximize").checked = !!d.Maximize;
-    $("e-displaykind").value = d.DisplayKind || "existing";
-    $("e-displayname").value = d.DisplayName || "";
-    $("e-createserver").value = d.CreateServer || "xvfb";
-    $("e-createsize").value = d.CreateSize || "";
-    $("e-createwm").value = d.CreateWM || "";
-    $("e-createhost").value = d.CreateHost || "";
-    $("e-codec").value = d.Codec || "hybrid";
-    $("e-quality").value = d.Quality || "";
-    $("e-fps").value = d.FPS || "";
-    $("e-downscale").value = d.Downscale || "1";
-    $("e-clipboard").checked = d.Clipboard !== false;
-    $("e-resize").checked = !!d.ResizeDesktop;
-    $("e-upscale").value = d.Upscale || "1";
-    $("e-fast").checked = !!d.FastScale;
+    fill("known-servers", knownServers());
+    $("e-name").value = d.name || "";
+    $("e-server").value = d.server || "";
+    $("e-app").value = d.appCmd || "";
+    $("e-window").value = d.windowID || "";
+    $("e-maximize").checked = !!d.maximize;
+    $("e-displaykind").value = d.displayKind || "existing";
+    $("e-displayname").value = d.displayName || "";
+    $("e-createserver").value = d.createServer || "xvfb";
+    $("e-createsize").value = d.createSize || "";
+    $("e-createwm").value = d.createWM || "";
+    $("e-createhost").value = d.createHost || "";
+    $("e-quality").value = d.quality || "";
+    $("e-fps").value = d.fPS || "";
+    $("e-scale").value = d.downscale || "1";
+    $("e-clipboard").checked = d.clipboard !== false;
+    $("e-resize").checked = !!d.resizeDesktop;
+    $("e-fast").checked = !!d.fastScale;
     for (const el of document.querySelectorAll('input[name="source"]')) {
-      el.checked = el.value === (d.Source || "desktop");
+      el.checked = el.value === (d.source || "desktop");
     }
     shapeEditor();
     show("edit");
+    $("e-rest").disabled = true;
+    $("e-probe").textContent = "connecting…";
+    probe();
     $("e-name").focus();
   } catch (err) { fail(err); }
 }
@@ -131,27 +198,30 @@ function shapeEditor() {
 
 function readDraft() {
   const d = state.editing || {};
-  d.Name = $("e-name").value;
-  d.Server = $("e-server").value;
-  d.Identity = $("e-identity").value;
-  d.Source = document.querySelector('input[name="source"]:checked')?.value || "desktop";
-  d.AppCmd = $("e-app").value;
-  d.WindowID = $("e-window").value;
-  d.Maximize = $("e-maximize").checked;
-  d.DisplayKind = $("e-displaykind").value;
-  d.DisplayName = $("e-displayname").value;
-  d.CreateServer = $("e-createserver").value;
-  d.CreateSize = $("e-createsize").value;
-  d.CreateWM = $("e-createwm").value;
-  d.CreateHost = $("e-createhost").value;
-  d.Codec = $("e-codec").value;
-  d.Quality = $("e-quality").value;
-  d.FPS = $("e-fps").value;
-  d.Downscale = $("e-downscale").value;
-  d.Clipboard = $("e-clipboard").checked;
-  d.ResizeDesktop = $("e-resize").checked;
-  d.Upscale = $("e-upscale").value;
-  d.FastScale = $("e-fast").checked;
+  d.name = $("e-name").value;
+  d.server = $("e-server").value;
+  d.identity = "";
+  d.source = document.querySelector('input[name="source"]:checked')?.value || "desktop";
+  d.appCmd = $("e-app").value;
+  d.windowID = $("e-window").value;
+  d.maximize = $("e-maximize").checked;
+  d.displayKind = $("e-displaykind").value;
+  d.displayName = $("e-displayname").value;
+  d.createServer = $("e-createserver").value;
+  d.createSize = $("e-createsize").value;
+  d.createWM = $("e-createwm").value;
+  d.createHost = $("e-createhost").value;
+  d.codec = $("e-codec").value;
+  d.quality = $("e-quality").value;
+  d.fPS = $("e-fps").value;
+  // One scale drives both halves: the host sends every Nth pixel and the
+  // viewer magnifies them back, so the canvas and the pointer mapping
+  // stay in host coordinates.
+  d.downscale = $("e-scale").value;
+  d.upscale = $("e-scale").value;
+  d.clipboard = $("e-clipboard").checked;
+  d.resizeDesktop = $("e-resize").checked;
+  d.fastScale = $("e-fast").checked;
   return d;
 }
 
@@ -159,12 +229,12 @@ async function save(connectAfter) {
   try {
     const d = readDraft();
     await api().Save(d);
-    state.editingName = d.Name;
+    state.editingName = d.name;
     await refreshProfiles();
-    const i = state.profiles.findIndex((p) => p.name === d.Name);
+    const i = state.profiles.findIndex((p) => p.name === d.name);
     if (i >= 0) state.selected = i;
     renderProfiles();
-    if (connectAfter) connect(d.Name);
+    if (connectAfter) connect(d.name);
     else show("list");
   } catch (err) { fail(err); }
 }
@@ -185,21 +255,21 @@ async function connect(name) {
 
 function renderSession(info) {
   const dot = $("session-dot");
-  dot.className = "dot " + (info.State || "");
-  $("session-state").textContent = info.State || "…";
+  dot.className = "dot " + (info.state || "");
+  $("session-state").textContent = info.state || "…";
   const bits = [];
-  if (info.Display) bits.push(info.Display + (info.Width ? " " + info.Width + "×" + info.Height : ""));
-  if (info.Spec?.Source) bits.push(info.Spec.Source + " · " + (info.Spec.Stream?.Codec || ""));
-  if (info.Spec?.App?.Command) bits.push("app: " + info.Spec.App.Command);
+  if (info.display) bits.push(info.display + (info.width ? " " + info.width + "×" + info.height : ""));
+  if (info.spec?.source) bits.push(info.spec.source + " · " + (info.spec.stream?.codec || ""));
+  if (info.spec?.app?.command) bits.push("app: " + info.spec.app.command);
   $("session-detail").textContent = bits.join("  ·  ");
   const summary = [];
-  if (info.Error) summary.push(info.Error);
-  else if (info.State === "starting") summary.push("asking the daemon to get things ready…");
-  else if (info.State === "live") summary.push("The session is running on the host. Opening the viewer attaches to it;\n" +
+  if (info.error) summary.push(info.error);
+  else if (info.state === "starting") summary.push("asking the daemon to get things ready…");
+  else if (info.state === "live") summary.push("The session is running on the host. Opening the viewer attaches to it;\n" +
     "closing the viewer window detaches and nothing more.");
-  else if (info.State === "stopped") summary.push("Terminated: the session is gone and the daemon has stopped.");
+  else if (info.state === "stopped") summary.push("Terminated: the session is gone and the daemon has stopped.");
   $("session-summary").textContent = summary.join("\n");
-  $("btn-viewer").disabled = info.State !== "live";
+  $("btn-viewer").disabled = info.state !== "live";
 }
 
 function renderLog(lines) {
@@ -238,13 +308,13 @@ async function listClients() {
       const row = document.createElement("div");
       row.className = "row-item";
       row.innerHTML = '<span class="name"></span><span class="sub"></span><span class="tag"></span>';
-      row.querySelector(".name").textContent = c.Name;
-      row.querySelector(".sub").textContent = c.Role;
-      row.querySelector(".tag").textContent = c.Revoked ? "revoked" : "paired";
+      row.querySelector(".name").textContent = c.name;
+      row.querySelector(".sub").textContent = c.role;
+      row.querySelector(".tag").textContent = c.revoked ? "revoked" : "paired";
       row.onclick = () => {
-        confirmAsk("Revoke this device?", c.Name + " will no longer be able to connect.",
+        confirmAsk("Revoke this device?", c.name + " will no longer be able to connect.",
           "Revoke", async () => {
-            try { await api().Revoke(...deviceArgs(), c.Name); await listClients(); }
+            try { await api().Revoke(...deviceArgs(), c.name); await listClients(); }
             catch (err) { fail(err); }
           });
       };
@@ -325,6 +395,8 @@ function connectButtons() {
   for (const el of document.querySelectorAll('input[name="source"], #e-displaykind, #e-createserver')) {
     el.onchange = shapeEditor;
   }
+  $("e-server").addEventListener("change", probe);
+  $("e-server").addEventListener("blur", probe);
 }
 
 window.addEventListener("keydown", (ev) => {

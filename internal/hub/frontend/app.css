@@ -129,7 +129,24 @@ input, select {
 }
 input { flex: 1; }
 input.num { width: 64px; flex: none; }
-select { flex: none; }
+select {
+  flex: none;
+  appearance: none;
+  padding-right: 26px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%239aa0a6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+select:hover, input:hover { border-color: #454d56; }
+
+/* the form waits for the host before it is worth filling in */
+fieldset { border: 0; padding: 0; margin: 14px 0 0; min-width: 0; }
+fieldset:disabled label, fieldset:disabled .check, fieldset:disabled .radio { opacity: .45; }
+fieldset:disabled input, fieldset:disabled select { opacity: .6; cursor: default; }
+.probe { color: var(--faint); font-size: 12px; }
+.probe.ok { color: var(--ok); }
+
+.grid + .toolbar, fieldset + .toolbar { margin-top: 22px; }
 input::placeholder { color: var(--faint); }
 .check { display: inline-flex; align-items: center; gap: 6px; color: var(--fg); }
 .radio { display: inline-flex; align-items: center; gap: 6px; color: var(--fg); }

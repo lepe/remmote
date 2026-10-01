@@ -96,6 +96,17 @@ func HasWM(name string) bool {
 	return findBin(strings.TrimSpace(name)) != ""
 }
 
+// DisplayNames lists the displays that are up, as names (":0", ":88").
+// Whether they can be opened is a separate question (see Open).
+func DisplayNames() []string {
+	nums := Displays()
+	out := make([]string, 0, len(nums))
+	for _, n := range nums {
+		out = append(out, ":"+n)
+	}
+	return out
+}
+
 // Displays lists the display numbers that have a socket up, ascending.
 // Whether they can be opened is a separate question (see Open).
 func Displays() []string {

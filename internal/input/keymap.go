@@ -91,15 +91,17 @@ func (k *Keymap) FindKeysym(ks xproto.Keysym) (kc xproto.Keycode, needShift bool
 	if ks == 0 {
 		return 0, false, false
 	}
-	for kc := k.minKC; kc <= k.maxKC; kc++ {
-		if k.syms[(int(kc)-int(k.minKC))*k.cols] == ks {
-			return kc, false, true
+	// Keycode is a byte: a loop over it wraps at 255 (a legal maximum)
+	// and walks off the table. Count in int, convert on use.
+	for i := int(k.minKC); i <= int(k.maxKC); i++ {
+		if k.syms[(i-int(k.minKC))*k.cols] == ks {
+			return xproto.Keycode(i), false, true
 		}
 	}
 	for col := 1; col < k.cols; col++ {
-		for kc := k.minKC; kc <= k.maxKC; kc++ {
-			if k.syms[(int(kc)-int(k.minKC))*k.cols+col] == ks {
-				return kc, true, true
+		for i := int(k.minKC); i <= int(k.maxKC); i++ {
+			if k.syms[(i-int(k.minKC))*k.cols+col] == ks {
+				return xproto.Keycode(i), true, true
 			}
 		}
 	}
