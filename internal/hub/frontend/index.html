@@ -196,30 +196,26 @@
 
         <label for="d-code">Code</label>
         <input id="d-code" placeholder="the pairing code this host printed">
-      </div>
-      <div class="toolbar">
-        <button class="primary" id="btn-pair">Pair device</button>
-        <button id="btn-device-cancel">Cancel</button>
-      </div>
-      <p class="hint">A pairing code is how a device gets its own credential — its key never
-        leaves that machine, and it can be revoked on its own. Trust needs nothing typed in:
-        the host's authority comes back with the credential, and every later connection is
-        checked against it.</p>
-    </div>
 
         <label for="d-tls">TLS verification</label>
-        <input id="d-tls" placeholder="empty = auto (TLS, not yet verified) · or a SHA256: pin">
-
-        <label for="d-code">Code</label>
-        <input id="d-code" placeholder="the pairing code this host printed">
+        <div class="row">
+          <select id="d-tls">
+            <option value="off">Disabled — encrypted, certificate not checked</option>
+            <option value="on" selected>Enabled — the host's certificate is checked</option>
+          </select>
+          <span class="caption">checked from the first pairing onwards</span>
+        </div>
       </div>
       <div class="toolbar">
         <button class="primary" id="btn-pair">Pair device</button>
         <button id="btn-device-cancel">Cancel</button>
       </div>
       <p class="hint">A pairing code is how a device gets its own credential — its key never
-        leaves that machine, and it can be revoked on its own.</p>
+        leaves that machine, and it can be revoked on its own. With TLS verification enabled
+        the host's certificate is remembered here at pairing and checked on every later
+        connection, so there is no fingerprint to read, copy or compare.</p>
     </div>
+
   </section>
 </main>
 

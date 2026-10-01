@@ -366,7 +366,10 @@ function renderDevices(devices) {
     row.innerHTML = '<span class="name"></span><span class="sub"></span><span class="tag"></span>';
     row.querySelector(".name").textContent = d.name;
     row.querySelector(".sub").textContent =
-      d.server + (d.role ? " · " + d.role : "");
+      d.server + (d.role ? " · " + d.role : "") + (d.verify ? " · TLS verified" : " · TLS unchecked");
+    row.querySelector(".tag").title = d.verify
+      ? "This host's certificate is checked on every connection"
+      : "This host's certificate is not checked";
     row.querySelector(".tag").textContent = d.pairedAt ? when(d.pairedAt) : "paired";
     row.onclick = () => {
       confirmAsk("Revoke this device?", d.name +
@@ -389,8 +392,9 @@ function when(iso) {
 async function pairDevice() {
   try {
     const rec = await api().PairDevice($("d-name").value, $("d-server").value,
-      $("d-role").value, $("d-code").value);
-    toast("paired \"" + rec.name + "\" with " + rec.server + " as " + rec.role);
+      $("d-role").value, $("d-code").value, $("d-tls").value === "on");
+    toast("paired \"" + rec.name + "\" with " + rec.server + " as " + rec.role +
+      (rec.verify ? " (TLS verified)" : ""));
     for (const id of ["d-name", "d-server", "d-code"]) $(id).value = "";
     await refreshDevices();
   } catch (err) { fail(err); }

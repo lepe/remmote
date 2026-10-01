@@ -408,11 +408,13 @@ func (s *Service) Revoke(server, identityName, tlsValue, name string) error {
 // Device is a host this machine is paired with: what it is called, where
 // it is, and the credentials used with it.
 type Device struct {
-	Name       string    `json:"name"`       // what the host is called
-	Server     string    `json:"server"`     // host:port
-	Credential string    `json:"credential"` // the credential pairing made for it
-	Role       string    `json:"role"`       // what it may do there: view, control or admin
-	PairedAt   time.Time `json:"pairedAt"`
+	Name        string    `json:"name"`                  // what the host is called
+	Server      string    `json:"server"`                // host:port
+	Credential  string    `json:"credential"`            // the credential pairing made for it
+	Role        string    `json:"role"`                  // what it may do there: view, control or admin
+	Fingerprint string    `json:"fingerprint,omitempty"` // the host's certificate, pinned when Verify is set
+	Verify      bool      `json:"verify"`                // whether that certificate is checked on every connection
+	PairedAt    time.Time `json:"pairedAt"`
 }
 
 // Devices lists the hosts this machine is paired with.
@@ -433,10 +435,15 @@ func (s *Service) Devices() ([]Device, error) {
 
 // PairDevice pairs this machine with a host and keeps the record of it.
 // The credential it makes is named after the host, and its key never
-// leaves this machine. Trust is not something to type in: the host's
-// authority comes back with the credential and every later connection is
-// verified against it.
-func (s *Service) PairDevice(name, server, role, code string) (Device, error) {
+// leaves this machine.
+//
+// Trust is not something to type in. When verify is set, the host's
+// certificate is read off the pairing connection and kept, so every
+// later connection is checked against the same one — the pairing code is
+// what vouches for the first answer, and the certificate is what is
+// checked from then on. With verify off the certificate is left unchecked,
+// which is only sensible over a network you already trust.
+func (s *Service) PairDevice(name, server, role, code string, verify bool) (Device, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return Device{}, fmt.Errorf("the device needs a name")
@@ -461,7 +468,16 @@ func (s *Service) PairDevice(name, server, role, code string) (Device, error) {
 		return Device{}, err
 	}
 	rec := Device{Name: name, Server: server, Credential: name,
-		Role: id.Role, PairedAt: time.Now()}
+		Role: id.Role, Verify: verify, PairedAt: time.Now()}
+	if verify {
+		// The fingerprint is generated here and kept out of sight: it is
+		// an implementation of "check the certificate", not something a
+		// person has to read, copy or compare.
+		rec.Fingerprint, err = tlsutil.ServerFingerprint(server)
+		if err != nil {
+			return Device{}, fmt.Errorf("could not read %s's certificate to pin it: %w", server, err)
+		}
+	}
 	if err := s.saveDevice(rec); err != nil {
 		return Device{}, err
 	}
@@ -491,7 +507,7 @@ func (s *Service) RemoveDevice(name string) error {
 	if auth.AtLeast(gone.Role, auth.RoleAdmin) {
 		// Best effort: a host that is offline keeps its side of the
 		// record until someone revokes it there.
-		if c, _, err := link(gone.Server, "", gone.Credential); err == nil {
+		if c, err := deviceClient(*gone); err == nil {
 			_ = c.Revoke(context.Background(), gone.Credential)
 		}
 	}
@@ -577,7 +593,11 @@ func link(server, tlsValue, named string) (*api.Client, string, error) {
 		if err != nil {
 			return nil, name, err
 		}
-		c, err := api.NewClientIdentity(server, id)
+		// A credential this machine paired has a record of how it was
+		// paired: the host's certificate is pinned when the record says it
+		// was verified, and left unchecked when it was not.
+		pin := pinFor(server, name)
+		c, err := api.NewClientPinned(server, id, pin)
 		return c, name, err
 	}
 	cfg, err := tlsValueConfig(tlsValue)
@@ -585,6 +605,36 @@ func link(server, tlsValue, named string) (*api.Client, string, error) {
 		return nil, "", err
 	}
 	return api.NewClient(server, cfg), "", nil
+}
+
+// deviceClient reaches a host as one of the devices this machine paired
+// with it, the way that pairing said to.
+func deviceClient(rec Device) (*api.Client, error) {
+	id, err := auth.LoadIdentity(auth.DefaultIdentityDir(rec.Credential))
+	if err != nil {
+		return nil, err
+	}
+	pin := ""
+	if rec.Verify {
+		pin = rec.Fingerprint
+	}
+	return api.NewClientPinned(rec.Server, id, pin)
+}
+
+// pinFor is the fingerprint a paired credential keeps for a host, and
+// empty when there is none to keep: either the host was never paired from
+// here, or it was paired with verification off.
+func pinFor(server, name string) string {
+	list, err := (&Service{}).Devices()
+	if err != nil {
+		return ""
+	}
+	for _, rec := range list {
+		if rec.Credential == name && rec.Server == server && rec.Verify {
+			return rec.Fingerprint
+		}
+	}
+	return ""
 }
 
 // deviceFor finds the credential a host accepts: the first of this
@@ -596,7 +646,7 @@ func deviceFor(server, tlsValue string) string {
 		if err != nil {
 			continue
 		}
-		c, err := api.NewClientIdentity(server, id)
+		c, err := api.NewClientPinned(server, id, pinFor(server, name))
 		if err != nil {
 			continue
 		}

@@ -59,6 +59,29 @@ func NewClientIdentity(addr string, id *auth.Identity) (*Client, error) {
 	return NewClient(addr, cfg), nil
 }
 
+// NewClientPinned is NewClientIdentity with the server's certificate
+// pinned to a fingerprint — the one pairing learned. fingerprint empty
+// means the device was paired without verification, so the certificate
+// is left unchecked.
+func NewClientPinned(addr string, id *auth.Identity, fingerprint string) (*Client, error) {
+	if fingerprint == "" {
+		cfg, err := id.InsecureTLSConfig(addr)
+		if err != nil {
+			return nil, err
+		}
+		return NewClient(addr, cfg), nil
+	}
+	cfg, err := id.TLSConfig(addr)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err = tlsutil.Pin(cfg, fingerprint)
+	if err != nil {
+		return nil, err
+	}
+	return NewClient(addr, cfg), nil
+}
+
 // Host asks the daemon what it can do.
 func (c *Client) Host(ctx context.Context) (*HostInfo, error) {
 	resp, err := c.do(ctx, http.MethodGet, PathHost, nil)

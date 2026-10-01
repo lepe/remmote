@@ -463,6 +463,21 @@ func hostOf(addr string) string {
 	return addr
 }
 
+// InsecureTLSConfig is the device's side of the link with the server's
+// certificate left unchecked: the device still presents its own
+// certificate, so the daemon still knows who is asking, but it accepts
+// whatever certificate answers. This is what a device that was paired
+// with verification turned off gets — the encryption stays, the check
+// does not.
+func (i *Identity) InsecureTLSConfig(serverAddr string) (*tls.Config, error) {
+	cfg, err := i.TLSConfig(serverAddr)
+	if err != nil {
+		return nil, err
+	}
+	cfg.InsecureSkipVerify = true // nolint:gosec // the caller asked for no verification
+	return cfg, nil
+}
+
 // PairingFiles are the names an identity is stored under in a directory.
 const (
 	identityKey  = "client-key.pem"

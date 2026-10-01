@@ -484,3 +484,67 @@ func writeKeyPair(certFile, keyFile string, cert tls.Certificate) error {
 	}
 	return os.WriteFile(keyFile, keyPEM, 0o600)
 }
+
+// Pin turns a client configuration into one that also insists on a
+// particular server certificate, the way a -tls SHA256:... value does.
+// It is how a client that was handed no fingerprint can still end up
+// checking one: pairing learns the certificate, and Pin remembers it.
+//
+// cfg is modified in place and returned, so a caller can pin a config it
+// already built — the paired device's own certificate and trust anchor
+// stay exactly as they were.
+func Pin(cfg *tls.Config, fingerprint string) (*tls.Config, error) {
+	want, err := ParseFingerprint(fingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil {
+		cfg = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	// The chain may or may not verify on its own — a certificate signed by
+	// the authority does, a bare -tls one does not — so the pin is checked
+	// on its own terms and the library's own verdict is left out of it.
+	verify := cfg.VerifyPeerCertificate
+	cfg.InsecureSkipVerify = true
+	cfg.VerifyPeerCertificate = func(rawCerts [][]byte, chains [][]*x509.Certificate) error {
+		if verify != nil {
+			if err := verify(rawCerts, chains); err != nil {
+				return err
+			}
+		}
+		if len(rawCerts) == 0 {
+			return fmt.Errorf("tls: the server sent no certificate")
+		}
+		got, err := Fingerprint(rawCerts[0])
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(got, want) {
+			return fmt.Errorf("tls: the server's certificate is %s, but this device paired with %s — refusing", got, want)
+		}
+		return nil
+	}
+	return cfg, nil
+}
+
+// ServerFingerprint reports the fingerprint of the certificate a server
+// presents at addr, without trusting it: the connection is made, the
+// handshake is completed, and only then is the leaf looked at. That is
+// the "whoever answers first" reading, which is what pairing does — the
+// pairing code is what makes the answer the right one, and the
+// fingerprint it produces is what every later connection is pinned to.
+func ServerFingerprint(addr string) (string, error) {
+	conn, err := tls.Dial("tcp", addr, &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, // nolint:gosec // reading a fingerprint is the point
+	})
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	state := conn.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return "", fmt.Errorf("tls: %s presented no certificate", addr)
+	}
+	return Fingerprint(state.PeerCertificates[0].Raw)
+}
