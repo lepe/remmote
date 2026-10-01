@@ -38,6 +38,10 @@ var special = map[string]xproto.Keysym{
 	"Home":      0xff50,
 	"End":       0xff57,
 	"Space":     0x20,
+	"Control_L": 0xffe3,
+	"Control_R": 0xffe4,
+	"Shift_L":   0xffe1,
+	"Shift_R":   0xffe2,
 }
 
 func main() {
@@ -48,6 +52,7 @@ func main() {
 		keys    = flag.String("key", "", "comma-separated keys to press (Return, Tab, Escape, …)")
 		click   = flag.Bool("click", false, "click the middle of the window first (webviews want a click before they take keys)")
 		at      = flag.String("at", "", "click at these window-relative coordinates first, e.g. 240,143")
+		hold    = flag.String("hold", "", "hold these keys down while the rest is typed, e.g. Control_L")
 		wait    = flag.Duration("wait", 5*time.Second, "how long to wait for the window")
 	)
 	flag.Parse()
@@ -105,13 +110,33 @@ func main() {
 
 	if *keys != "" {
 		for _, name := range strings.Split(*keys, ",") {
-			ks, ok := special[strings.TrimSpace(name)]
+			name = strings.TrimSpace(name)
+			ks, ok := special[name]
+			if !ok && len(name) > 0 {
+				// A single character is its own keysym: Ctrl+3 is
+				// -key Control_L,3.
+				ks, ok = xproto.Keysym([]rune(name)[0]), true
+			}
 			if !ok {
 				fatal(fmt.Errorf("unknown key %q", name))
 			}
 			tap(inj, ks)
 		}
 	}
+	for _, name := range strings.Split(*hold, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		ks, ok := special[name]
+		if !ok {
+			fatal(fmt.Errorf("unknown key %q", name))
+		}
+		inj.Key(ks, true)
+		defer inj.Key(ks, false)
+		time.Sleep(50 * time.Millisecond)
+	}
+
 	// The injector resolves keysyms to keycodes and holds Shift for the
 	// ones that need it: an ASCII character is its own keysym.
 	for _, r := range *text {

@@ -20,6 +20,7 @@ const state = {
 function show(view) {
   for (const el of document.querySelectorAll(".view")) el.classList.add("hidden");
   $("view-" + view).classList.remove("hidden");
+  if (view === "devices") showDevices();
   for (const tab of document.querySelectorAll(".tab")) {
     tab.classList.toggle("active", tab.dataset.view === view);
     if (tab.dataset.view === view) tab.setAttribute("aria-current", "page");
@@ -322,39 +323,71 @@ async function refreshSession() {
 
 /* ── devices ────────────────────────────────────────────────────── */
 
-function deviceArgs() {
-  return [$("d-server").value, $("d-identity").value, $("d-tls").value];
+// The list is what the tab shows; the form is what "+ New device" shows
+// — and what shows first when there is nothing to list yet.
+// showDevices decides what the Devices tab shows: the list of paired
+// devices, or the form to make one — which is what shows first when
+// there is nothing to list yet.
+function showDevices() {
+  const devices = state.devices || [];
+  $("devices-list-panel").style.display = devices.length ? "" : "none";
+  $("device-form").style.display = devices.length ? "none" : "";
 }
 
-async function listClients() {
-  if (!$("d-server").value.trim()) return;
+async function refreshDevices() {
   try {
-    const list = await api().Clients(...deviceArgs());
-    const box = $("clients");
-    box.innerHTML = "";
-    if (!list.length) {
-      box.innerHTML = '<div class="empty"><strong>No paired devices</strong><p>Use a pairing code below to give this machine access.</p></div>';
-      return;
-    }
-    for (const c of list) {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.disabled = !!c.revoked;
-      row.setAttribute("aria-label", c.name + (c.revoked ? ", revoked" : ", " + c.role + ". Revoke access"));
-      row.className = "row-item";
-      row.innerHTML = '<span class="name"></span><span class="sub"></span><span class="tag"></span>';
-      row.querySelector(".name").textContent = c.name;
-      row.querySelector(".sub").textContent = c.role;
-      row.querySelector(".tag").textContent = c.revoked ? "revoked" : "paired";
-      row.onclick = () => {
-        confirmAsk("Revoke this device?", c.name + " will no longer be able to connect.",
-          "Revoke", async () => {
-            try { await api().Revoke(...deviceArgs(), c.name); await listClients(); }
-            catch (err) { fail(err); }
-          });
-      };
-      box.appendChild(row);
-    }
+    state.devices = await api().Devices();
+    renderDevices(state.devices);
+    showDevices();
+  } catch (err) {
+    fail(err);
+    state.devices = [];
+    showDevices();
+  }
+}
+
+function renderDevices(devices) {
+  const box = $("devices");
+  box.innerHTML = "";
+  if (!devices.length) {
+    box.innerHTML = '<div class="empty"><strong>No devices yet</strong>' +
+      "<p>Pair one and it can connect to this host.</p></div>";
+    return;
+  }
+  for (const d of devices) {
+    const row = document.createElement("div");
+    row.className = "row-item";
+    row.innerHTML = '<span class="name"></span><span class="sub"></span><span class="tag"></span>';
+    row.querySelector(".name").textContent = d.name;
+    row.querySelector(".sub").textContent =
+      d.server + (d.credential ? " · " + d.credential : "") +
+      (d.admin ? " · managed as " + d.admin : "");
+    row.querySelector(".tag").textContent = d.pairedAt ? when(d.pairedAt) : "paired";
+    row.onclick = () => {
+      confirmAsk("Revoke this device?", d.name +
+        " will no longer be able to connect to " + d.server + ".", "Revoke", async () => {
+          try { await api().RemoveDevice(d.name); await refreshDevices(); }
+          catch (err) { fail(err); }
+        });
+    };
+    box.appendChild(row);
+  }
+}
+
+function when(iso) {
+  try {
+    const t = new Date(iso);
+    return t.toLocaleDateString() + " " + t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  } catch (e) { return "paired"; }
+}
+
+async function pairDevice() {
+  try {
+    const rec = await api().PairDevice($("d-name").value, $("d-server").value,
+      $("d-identity").value, $("d-tls").value, $("d-code").value);
+    toast("paired \"" + rec.name + "\" with " + rec.server);
+    for (const id of ["d-name", "d-server", "d-identity", "d-tls", "d-code"]) $(id).value = "";
+    await refreshDevices();
   } catch (err) { fail(err); }
 }
 
@@ -405,25 +438,17 @@ function connectButtons() {
       });
   };
 
-  $("btn-devices").onclick = listClients;
-  $("btn-paircode").onclick = async () => {
-    try {
-      const code = await api().PairCode(...deviceArgs(), "view");
-      toast("pairing code (view): " + code);
-    } catch (err) { fail(err); }
+  $("btn-new-device").onclick = () => {
+    $("devices-list-panel").style.display = "none";
+    $("device-form").style.display = "";
   };
-  $("btn-pair").onclick = async () => {
-    try {
-      const role = await api().Pair($("d-server").value, $("d-tls").value,
-        $("d-code").value, $("d-name").value);
-      toast("paired \"" + $("d-name").value + "\" as " + role);
-    } catch (err) { fail(err); }
-  };
+  $("btn-device-cancel").onclick = showDevices;
+  $("btn-pair").onclick = pairDevice;
 
   for (const tab of document.querySelectorAll(".tab")) {
     tab.onclick = () => {
       show(tab.dataset.view);
-      if (tab.dataset.view === "devices") listClients();
+      if (tab.dataset.view === "devices") refreshDevices();
       if (tab.dataset.view === "list") refreshProfiles();
       if (tab.dataset.view === "session") refreshSession();
     };
@@ -435,7 +460,22 @@ function connectButtons() {
   $("e-server").addEventListener("blur", probe);
 }
 
+// Ctrl+1/2/3 switch tabs: the three views are the whole app, and a
+// keyboard should reach all of them.
+function switchTab(ev) {
+  if (!ev.ctrlKey || ev.altKey || ev.metaKey) return false;
+  const views = { "1": "list", "2": "session", "3": "devices" };
+  const view = views[ev.key];
+  if (!view) return false;
+  ev.preventDefault();
+  show(view);
+  if (view === "devices") refreshDevices();
+  if (view === "list") refreshProfiles();
+  return true;
+}
+
 window.addEventListener("keydown", (ev) => {
+  if (switchTab(ev)) return;
   if (!$("modal").classList.contains("hidden")) {
     if (ev.key === "Escape") { ev.preventDefault(); closeModal(); }
     if (ev.key === "Tab") {
@@ -476,6 +516,7 @@ window.addEventListener("keydown", (ev) => {
 window.addEventListener("load", async () => {
   connectButtons();
   await refreshProfiles();
+  await refreshDevices();
   show("list");
   refreshSession();
   setInterval(refreshSession, 2000);

@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/lepe/remmote/internal/api"
 	"github.com/lepe/remmote/internal/auth"
@@ -402,6 +404,135 @@ func (s *Service) Revoke(server, identityName, tlsValue, name string) error {
 		return explain(err, server)
 	}
 	return explain(c.Revoke(context.Background(), name), server)
+}
+
+// Device is a host this machine is paired with: what it is called, where
+// it is, and the credentials used with it.
+type Device struct {
+	Name       string    `json:"name"`            // what the host is called
+	Server     string    `json:"server"`          // host:port
+	Credential string    `json:"credential"`      // the credential pairing made for it
+	Admin      string    `json:"admin,omitempty"` // the credential that manages it (optional)
+	TLS        string    `json:"tls,omitempty"`
+	PairedAt   time.Time `json:"pairedAt"`
+}
+
+// Devices lists the hosts this machine is paired with.
+func (s *Service) Devices() ([]Device, error) {
+	raw, err := os.ReadFile(devicesPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []Device{}, nil
+		}
+		return nil, err
+	}
+	var list []Device
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, fmt.Errorf("devices: %w", err)
+	}
+	return list, nil
+}
+
+// PairDevice pairs this machine with a host and keeps the record of it.
+// The credential it makes is named after the host, and its key never
+// leaves this machine.
+func (s *Service) PairDevice(name, server, admin, tlsValue, code string) (Device, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Device{}, fmt.Errorf("the device needs a name")
+	}
+	if strings.TrimSpace(server) == "" {
+		return Device{}, fmt.Errorf("the device needs a server address")
+	}
+	cfg, err := pairingConfig(tlsValue)
+	if err != nil {
+		return Device{}, explain(err, server)
+	}
+	c := api.NewClient(server, cfg)
+	keyPEM, csrPEM, err := auth.NewIdentity(name)
+	if err != nil {
+		return Device{}, err
+	}
+	id, err := c.Pair(context.Background(), code, name, keyPEM, csrPEM)
+	if err != nil {
+		return Device{}, explain(err, server)
+	}
+	if err := id.Save(auth.DefaultIdentityDir(name)); err != nil {
+		return Device{}, err
+	}
+	rec := Device{Name: name, Server: server, Credential: name,
+		Admin: strings.TrimSpace(admin), TLS: tlsValue, PairedAt: time.Now()}
+	if err := s.saveDevice(rec); err != nil {
+		return Device{}, err
+	}
+	return rec, nil
+}
+
+// RemoveDevice forgets a host and the credential made for it. The host
+// is told to revoke it too, when this machine holds a credential that
+// may say so; either way this machine stops using it.
+func (s *Service) RemoveDevice(name string) error {
+	list, err := s.Devices()
+	if err != nil {
+		return err
+	}
+	kept := make([]Device, 0, len(list))
+	var gone *Device
+	for i := range list {
+		if list[i].Name == name {
+			gone = &list[i]
+			continue
+		}
+		kept = append(kept, list[i])
+	}
+	if gone == nil {
+		return fmt.Errorf("no device named %q", name)
+	}
+	if gone.Admin != "" {
+		// Best effort: a host that is offline keeps its side of the
+		// record until someone revokes it there.
+		if c, _, err := link(gone.Server, gone.TLS, gone.Admin); err == nil {
+			_ = c.Revoke(context.Background(), gone.Credential)
+		}
+	}
+	_ = os.RemoveAll(auth.DefaultIdentityDir(gone.Credential))
+	return s.writeDevices(kept)
+}
+
+// saveDevice adds or replaces one record.
+func (s *Service) saveDevice(rec Device) error {
+	list, err := s.Devices()
+	if err != nil {
+		return err
+	}
+	for i := range list {
+		if list[i].Name == rec.Name {
+			list[i] = rec
+			return s.writeDevices(list)
+		}
+	}
+	return s.writeDevices(append(list, rec))
+}
+
+func (s *Service) writeDevices(list []Device) error {
+	raw, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := devicesPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// devicesPath is where this machine remembers its hosts.
+func devicesPath() string {
+	return filepath.Join(auth.ConfigHome(), "devices.json")
 }
 
 // ProbeResult is what reaching a host tells you: what it offers, and

@@ -158,30 +158,50 @@
 
   <!-- ── devices ────────────────────────────────────────────────── -->
   <section class="view hidden" id="view-devices">
-    <div class="page-heading"><div><p class="eyebrow">Access management</p><h2>Devices</h2><p class="description">Manage the devices that can connect to your host.</p></div></div>
-    <div class="panel form-panel">
-    <h3 class="section-heading">Host credentials</h3>
-    <div class="grid">
-      <label for="d-server">Server address</label><input id="d-server" placeholder="host:7677">
-      <label for="d-identity">Admin device</label><input id="d-identity" placeholder="Paired admin device (optional)">
-      <label for="d-tls">TLS verification</label><input id="d-tls" placeholder="Auto (unverified TLS), or a SHA256: pin">
+    <div class="page-heading">
+      <div>
+        <p class="eyebrow">Access management</p>
+        <h2>Devices</h2>
+        <p class="description">The hosts this machine is paired with, and the credential it uses for each.</p>
+      </div>
+      <button class="primary" id="btn-new-device">+ New device</button>
     </div>
-    <div class="toolbar">
-      <button id="btn-devices">List devices</button>
-      <button id="btn-paircode">New pairing code</button>
+
+    <div class="panel devices-panel hidden" id="devices-list-panel">
+      <div class="panel-heading">
+        <h3>Paired devices</h3>
+        <span class="caption">Select a device to revoke its access</span>
+      </div>
+      <div class="list" id="devices"></div>
     </div>
-    </div>
-    <div class="panel devices-panel"><div class="panel-heading"><h3>Paired devices</h3><span class="caption">Select a device to revoke access</span></div>
-    <div class="list" id="clients"><div class="empty"><strong>Manage access to your host</strong><p>Enter a server address to load its paired devices.</p></div></div>
-    </div>
-    <div class="panel form-panel pairing-panel"><h3 class="section-heading">Pair this machine</h3>
-    <div class="toolbar pairing-fields">
-      <label>Device name<input id="d-name" placeholder="e.g. Work laptop"></label>
-      <label>Pairing code<input id="d-code" placeholder="Enter pairing code"></label>
-      <button class="primary" id="btn-pair">Pair this machine</button>
-    </div>
-    <p class="hint">A pairing code is how a device gets its own credential — its key never
-      leaves that machine, and it can be revoked on its own.</p>
+
+    <div class="panel form-panel" id="device-form">
+      <h3 class="section-heading">New device</h3>
+      <div class="grid">
+        <label for="d-name">Server name</label>
+        <input id="d-name" placeholder="What this host is called, e.g. Workstation">
+
+        <label for="d-server">Server address</label>
+        <input id="d-server" placeholder="host:7677">
+
+        <label for="d-identity">Admin device</label>
+        <div class="row">
+          <input id="d-identity" placeholder="which credential to manage it with (optional)">
+          <span class="caption">an admin device can pair and revoke others</span>
+        </div>
+
+        <label for="d-tls">TLS verification</label>
+        <input id="d-tls" placeholder="empty = auto (TLS, not yet verified) · or a SHA256: pin">
+
+        <label for="d-code">Code</label>
+        <input id="d-code" placeholder="the pairing code this host printed">
+      </div>
+      <div class="toolbar">
+        <button class="primary" id="btn-pair">Pair device</button>
+        <button id="btn-device-cancel">Cancel</button>
+      </div>
+      <p class="hint">A pairing code is how a device gets its own credential — its key never
+        leaves that machine, and it can be revoked on its own.</p>
     </div>
   </section>
 </main>
