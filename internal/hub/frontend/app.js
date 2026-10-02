@@ -13,6 +13,9 @@ const state = {
   editing: null,      // the draft on the editor
   editingName: "",    // the name it had, so a rename is understood
   sessionName: "",    // the connection this session was made from
+  hostDisplays: [],   // what the probe said is up on the host
+  allowExec: false,   // the host permits launching applications
+  allowExecCommands: [], // the permitted commands, as it named them
 };
 
 /* ── views ──────────────────────────────────────────────────────── */
@@ -137,6 +140,22 @@ async function probe() {
 // exist, which codecs it encodes with, which window managers it has.
 function applyHost(host) {
   fill("host-displays", (host.displays || []).map((d) => d));
+  state.hostDisplays = host.displays || [];
+  state.allowExec = !!host.allowExec;
+  state.allowExecCommands = host.allowExecCommands || [];
+  // Launching applications is the host's decision, said in -allow-exec:
+  // the option only exists where the host said yes.
+  const appInput = document.querySelector('input[name="source"][value="app"]');
+  const appLabel = $("e-app-radio-label");
+  appInput.disabled = !state.allowExec;
+  appLabel.title = state.allowExec
+    ? "run one of the commands the host allows"
+    : "this daemon does not allow launching applications (-allow-exec)";
+  if ((document.querySelector('input[name="source"]:checked')?.value || "desktop") === "window") {
+    fillWindowDisplay();
+    winlistFor = null; // the display list may have changed under the picker
+    refreshWindowList();
+  }
   fill("host-wms", host.windowManagers || []);
   const codec = $("e-codec");
   const wanted = codec.value || "hybrid";
@@ -290,6 +309,117 @@ function shapeEditor() {
   document.querySelector(".only-create").style.display = kind === "create" ? "contents" : "none";
   $("e-displayname").style.display = kind === "create" ? "none" : "";
   $("e-createhost").style.display = server === "xephyr" ? "" : "none";
+  if (source === "window") {
+    // A window lives on a display that already exists: the create choice
+    // has nothing to list, so the source decides, not a leftover pick.
+    if (kind === "create") $("e-displaykind").value = "existing";
+    fillWindowDisplay();
+    refreshWindowList();
+  }
+  syncAppField();
+}
+
+/* The Application command field takes its shape from the host: a picker
+   over the allowed list when the host named commands (-allow-exec /
+   -allow-exec-file), the free box when it allowed everything with "*",
+   and neither matters where launching is refused. */
+function syncAppField() {
+  const list = state.allowExecCommands || [];
+  const concrete = state.allowExec && list.length > 0 && !list.includes("*");
+  const sel = $("e-applist"), box = $("e-app");
+  const pick = (id, show) => { $(id).classList.toggle("hidden", !show); };
+  pick("e-applist", concrete);
+  pick("e-applist-label", concrete);
+  pick("e-app", !concrete);
+  pick("e-app-label", !concrete);
+  if (!concrete) return;
+  const current = box.value.trim();
+  const names = [...new Set([...list, current])].filter(Boolean);
+  sel.textContent = "";
+  for (const n of names) {
+    const o = document.createElement("option");
+    o.value = n;
+    o.textContent = n;
+    sel.appendChild(o);
+  }
+  if (current) sel.value = current;
+  box.value = sel.value;
+}
+
+/* The window source picks in two steps: the display to look at, then a
+   window running on it — as the daemon sees them, no hex ids to type. */
+
+function fillWindowDisplay() {
+  const sel = $("e-windowdisplay");
+  const current = ($("e-displayname").value || "").trim();
+  const names = [...new Set([...(state.hostDisplays || []), current])].filter(Boolean);
+  if (!names.length) names.push(":0");
+  sel.textContent = "";
+  for (const n of names) {
+    const o = document.createElement("option");
+    o.value = n;
+    o.textContent = n;
+    sel.appendChild(o);
+  }
+  if (current) sel.value = current;
+  $("e-displayname").value = sel.value; // the draft keeps a display name
+}
+
+let winlistFor = null; // the "server/display" the list was fetched for
+
+async function refreshWindowList() {
+  const server = $("e-server").value.trim();
+  const display = ($("e-windowdisplay").value || $("e-displayname").value).trim() || ":0";
+  const sel = $("e-windowlist");
+  if (!server) return; // the probe fills e-server; without it there is nobody to ask
+  const key = server + "/" + display;
+  if (key === winlistFor && sel.options.length > 1) return;
+  sel.disabled = true;
+  sel.textContent = "";
+  const wait = document.createElement("option");
+  wait.value = "";
+  wait.textContent = "looking on " + display + "…";
+  sel.appendChild(wait);
+  try {
+    const wins = await api().Windows(server, "", "", display);
+    const now = ($("e-windowdisplay").value || $("e-displayname").value).trim() || ":0";
+    if (now !== display) return; // the display changed while we looked
+    winlistFor = key;
+    sel.textContent = "";
+    const head = document.createElement("option");
+    head.value = "";
+    head.textContent = wins.length
+      ? wins.length + (wins.length === 1 ? " window on " : " windows on ") + display
+      : "no shareable windows on " + display;
+    sel.appendChild(head);
+    for (const w of wins) {
+      const o = document.createElement("option");
+      o.value = w.id;
+      o.textContent = (w.title || w.id) + (w.class && w.class !== w.title ? " · " + w.class : "");
+      sel.appendChild(o);
+    }
+    // A saved connection comes with its window id: keep it and show it
+    // as the pick when the list knows it.
+    const picked = $("e-window").value;
+    if (picked) {
+      for (const o of sel.options) {
+        if (o.value === picked) {
+          sel.value = picked;
+          break;
+        }
+      }
+    }
+  } catch (err) {
+    winlistFor = null;
+    sel.textContent = "";
+    const oops = document.createElement("option");
+    oops.value = "";
+    oops.textContent = "cannot list windows";
+    sel.appendChild(oops);
+    fail(err);
+  } finally {
+    sel.disabled = false;
+  }
 }
 
 function readDraft() {
@@ -361,14 +491,17 @@ function renderSession(info) {
   $("session-detail").textContent = bits.join("  ·  ");
   const summary = [];
   if (info.error) summary.push(info.error);
-  else if (info.state === "starting") summary.push("asking the daemon to get things ready…");
-  else if (info.state === "live") summary.push("The session is running on the host. Opening the viewer attaches to it;\n" +
-    "closing the viewer window detaches and nothing more.");
-  else if (info.state === "stopped") summary.push("Terminated: the session is gone and the daemon has stopped.");
+  else if (info.state === "starting") summary.push("Asking the daemon to get things ready —\nthe viewer opens as soon as the session is live.");
+  else if (info.state === "live") summary.push("The session is running on the host — connecting opens the viewer in it.\n" +
+    "Closing the viewer window detaches; “Open viewer” attaches again.");
+  else if (info.state === "stopped") summary.push("Terminated: the session is gone. The daemon on the host is still running, ready for the next one.");
   else if (!info.state) summary.push("Choose a saved connection to start a remote session.");
   $("session-summary").textContent = summary.join("\n");
   $("btn-viewer").disabled = info.state !== "live";
-  $("btn-terminate").disabled = !info.state || info.state === "stopped";
+  // Terminating is an act on a session: with none running (or only a
+  // dead record of one), the button has nothing to act on — it hides.
+  const active = info.state === "starting" || info.state === "live";
+  $("btn-terminate").style.display = active ? "" : "none";
 }
 
 function renderLog(lines) {
@@ -571,8 +704,8 @@ function connectButtons() {
     catch (err) { fail(err); }
   };
   $("btn-terminate").onclick = () => {
-    confirmAsk("Terminate the session?", "This stops the session and shuts down " +
-      "remmote-server on the host. Anything it started goes with it.", "Terminate",
+    confirmAsk("Terminate the session?", "This ends the session on the host — anything it started goes with it. " +
+      "remmote-server itself keeps running, ready for the next one.", "Terminate",
       async () => {
         try {
           await api().Terminate();
@@ -603,6 +736,20 @@ function connectButtons() {
     el.onchange = shapeEditor;
   }
   $("e-host").onchange = chooseDevice;
+  $("e-windowdisplay").onchange = () => {
+    $("e-displayname").value = $("e-windowdisplay").value;
+    $("e-window").value = ""; // the saved pick belonged to another display
+    winlistFor = null;
+    refreshWindowList();
+  };
+  $("e-windowlist").onchange = () => {
+    const v = $("e-windowlist").value;
+    if (v) $("e-window").value = v;
+  };
+  $("e-applist").onchange = () => {
+    const v = $("e-applist").value;
+    if (v) $("e-app").value = v;
+  };
 
   // The unsafe choice says what it costs, right where it is chosen.
   $("d-tls").onchange = () => {

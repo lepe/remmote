@@ -12,8 +12,8 @@
 #   * detach: the display and the application keep running without a
 #     viewer
 #   * replace: the old display and application are freed, not leaked
-#   * terminate: the display is gone, the application is dead and the
-#     service has stopped
+#   * terminate: the display is gone and the application is dead; the
+#     daemon keeps serving, ready for the next session
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -168,17 +168,17 @@ echo "== the created display is the size that was asked for"
 has "$SESSION" '"width": 640' || { echo "FAIL: 640x480 was not honoured"; echo "$SESSION"; exit 1; }
 has "$SESSION" '"height": 480' || { echo "FAIL: 640x480 was not honoured"; echo "$SESSION"; exit 1; }
 
-echo "== terminate: display gone, service gone"
+echo "== terminate: display and application released, the daemon keeps serving"
 ctl terminate
-for _ in $(seq 1 50); do
-	kill -0 "$SRV_PID" 2>/dev/null || break
-	sleep 0.2
-done
-if kill -0 "$SRV_PID" 2>/dev/null; then
-	echo "FAIL: the daemon kept running after terminate"
+if ! kill -0 "$SRV_PID" 2>/dev/null; then
+	echo "FAIL: the daemon stopped with the session"
 	exit 1
 fi
-SRV_PID=""
+sleep 0.2
+for _ in $(seq 1 50); do
+	[ ! -S "/tmp/.X11-unix/X$NEWNUM" ] && break
+	sleep 0.2
+done
 if [ -S "/tmp/.X11-unix/X$NEWNUM" ]; then
 	echo "FAIL: the created display :$NEWNUM leaked"
 	exit 1
@@ -188,5 +188,15 @@ if [ -n "$NEWAUTH" ] && [ -e "$NEWAUTH" ]; then
 	echo "FAIL: the cookie for :$NEWNUM leaked ($NEWAUTH)"
 	exit 1
 fi
+if ctl session >"$SPEC/out" 2>&1; then
+	echo "FAIL: the daemon still reports a session after terminate"
+	cat "$SPEC/out"
+	exit 1
+fi
+grep -q "no session is running" "$SPEC/out" || {
+	echo "FAIL: the daemon did not say the session is gone"
+	cat "$SPEC/out"
+	exit 1
+}
 
 echo "PASS: session lifecycle verified (create, app, attach, detach, replace, terminate)"

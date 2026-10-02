@@ -10,7 +10,7 @@
 //	remmote-ctl start -spec spec.json     start one (-wait to follow it,
 //	                                      -replace to stop the running one first)
 //	remmote-ctl events [-follow]          state changes and log lines
-//	remmote-ctl terminate                 stop the session and the service
+//	remmote-ctl terminate                 stop the running session (the daemon keeps running)
 //
 // The spec is JSON — the same shape as a saved connection profile — and
 // may come from a file or, with -spec -, from stdin.
@@ -150,7 +150,7 @@ func main() {
 		if err := c.Terminate(ctx); err != nil {
 			fatal(err)
 		}
-		fmt.Println("terminated: the session is gone and the daemon has stopped")
+		fmt.Println("terminated: the session is gone; the daemon keeps running")
 
 	case "pair":
 		if *pairName == "" || *pairCode == "" {

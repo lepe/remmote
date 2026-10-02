@@ -2,18 +2,24 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/lepe/remmote/internal/api"
 	"github.com/lepe/remmote/internal/auth"
+	"github.com/lepe/remmote/internal/profile"
 	"github.com/lepe/remmote/internal/tlsutil"
 )
 
@@ -74,7 +80,15 @@ func recordFor(t *testing.T, server, name string) Device {
 // pair against a real authority over a real TLS connection.
 func pairServer(t *testing.T, a *auth.Authority) *httptest.Server {
 	t.Helper()
-	cert, err := a.ServerCert([]string{"127.0.0.1"})
+	return pairServerNamed(t, a, []string{"127.0.0.1"})
+}
+
+// pairServerNamed is pairServer with a certificate naming only the given
+// hosts: what a daemon whose certificate does not cover the address it is
+// dialed by looks like from here.
+func pairServerNamed(t *testing.T, a *auth.Authority, hosts []string) *httptest.Server {
+	t.Helper()
+	cert, err := a.ServerCert(hosts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,5 +444,453 @@ func TestAPairedHostIsNeverReachedWithoutItsCredential(t *testing.T) {
 	}
 	if _, err := c.Host(context.Background()); err != nil {
 		t.Fatalf("the host was not reachable once the record was sound: %v", err)
+	}
+}
+
+// The viewer checks the host the way pairing established it: the
+// certificate that was learned then, not the name the address happens to
+// carry. The control link has always been pinned like this while the
+// viewer verified the name instead, so a host dialed by an address its
+// certificate does not cover answered the control link and refused the
+// viewer — "remote error: tls: bad certificate" in the host's log.
+func TestViewerChecksTheHostTheWayPairingPinnedIt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	authority, err := auth.Load(filepath.Join(home, "authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A certificate naming an address nothing dials by: only the pin can
+	// say this answer is still the right host.
+	srv := pairServerNamed(t, authority, []string{"somewhere-else"})
+	addr := srv.Listener.Addr().String()
+	code, err := authority.NewPairingCode(auth.RoleAdmin, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Service{}).PairDevice("desk", addr, "control", code, true); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := viewerTLS(profile.Profile{Server: addr}, "desk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg == nil {
+		t.Fatal("the viewer's link was configured for no TLS although the host was paired with it")
+	}
+
+	// The same link without the pin is refused — the name it is dialed by
+	// is not one the certificate covers — so what follows is about the
+	// pin and not about a certificate that happens to fit.
+	id, err := auth.LoadIdentity(auth.DefaultIdentityDir("desk"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := id.TLSConfig(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := tls.Dial("tcp", addr, plain); err == nil {
+		conn.Close()
+		t.Fatal("a name the certificate does not cover was accepted without the pin")
+	}
+	conn, err := tls.Dial("tcp", addr, cfg)
+	if err != nil {
+		t.Fatalf("the viewer's link refused the host it was paired with: %v", err)
+	}
+	conn.Close()
+
+	// A host answering with a different certificate is still refused.
+	other, err := auth.Load(filepath.Join(home, "other"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	impostor := pairServer(t, other)
+	if conn, err := tls.Dial("tcp", impostor.Listener.Addr().String(), cfg); err == nil {
+		conn.Close()
+		t.Fatal("a host with a different certificate was accepted")
+	}
+}
+
+// A host paired without encryption is reached without it — the viewer
+// too. There is no certificate to check because there is no encryption;
+// the record is what says so.
+func TestViewerGoesBackTheWayTheHostWasPaired(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	authority, err := auth.Load(filepath.Join(home, "authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := plainPairServer(t, authority)
+	addr := srv.Listener.Addr().String()
+	code, err := authority.NewPairingCode(auth.RoleAdmin, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Service{}).PairDevice("desk", addr, "control", code, false); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := viewerTLS(profile.Profile{Server: addr}, "desk")
+	if err != nil {
+		t.Fatalf("the viewer's link could not be configured: %v", err)
+	}
+	if cfg != nil {
+		t.Fatal("a host paired without encryption was reached with TLS")
+	}
+}
+
+// And when the record cannot vouch for the host, the answer is an error:
+// the viewer is never opened on a link that checks less than pairing
+// established.
+func TestViewerRefusesARecordItCannotUse(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	authority, err := auth.Load(filepath.Join(home, "authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := pairServer(t, authority)
+	addr := srv.Listener.Addr().String()
+	code, err := authority.NewPairingCode(auth.RoleAdmin, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := (&Service{}).PairDevice("desk", addr, "control", code, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	broken := rec
+	broken.Fingerprint = "not-a-fingerprint"
+	raw, err := json.Marshal([]Device{broken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(devicesPath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := viewerTLS(profile.Profile{Server: addr}, "desk")
+	if err == nil {
+		t.Fatal("the viewer's link was configured although the record could not be used")
+	}
+	if cfg != nil {
+		t.Fatal("a refused record still produced a link")
+	}
+	if strings.Contains(err.Error(), "not encrypted") {
+		t.Fatalf("the failure was reported as a fallback to no encryption: %v", err)
+	}
+}
+
+// Terminating a session asks the daemon to end the session — never to
+// stop serving — and returns this machine's panel to how it was before
+// the connection was made.
+func TestTerminateResetsToBeforeConnecting(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+
+	var mu sync.Mutex
+	var started, terminated bool
+	eventsClosed := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(api.PathSession, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			if !started || terminated {
+				http.Error(w, "no session is running on this daemon", http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(api.SessionInfo{State: api.StateLive})
+		case http.MethodPost:
+			started = true
+			_ = json.NewEncoder(w).Encode(api.SessionInfo{State: api.StateStarting})
+		case http.MethodDelete:
+			terminated = true
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		}
+	})
+	// The event stream stays open until the client hangs up, as a real
+	// daemon's does — a Terminate that leaves it behind shows here.
+	mux.HandleFunc(api.PathEvents, func(w http.ResponseWriter, r *http.Request) {
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+		<-r.Context().Done()
+		close(eventsClosed)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+
+	store, err := profile.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := api.SessionSpec{Display: api.DisplaySpec{Kind: "existing", Name: ":0"}}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(profile.Profile{Name: "desk", Server: addr, Spec: spec}); err != nil {
+		t.Fatal(err)
+	}
+	s := NewService(store, "", nil)
+
+	info, err := s.Connect("desk")
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if info.State != api.StateStarting {
+		t.Fatalf("the session did not start: state %q", info.State)
+	}
+
+	if err := s.Terminate(); err != nil {
+		t.Fatalf("terminate: %v", err)
+	}
+	mu.Lock()
+	asked := terminated
+	mu.Unlock()
+	if !asked {
+		t.Fatal("the daemon was never asked to end the session")
+	}
+	if s.conn != nil {
+		t.Fatal("the connection survived the terminate")
+	}
+	if s.info.State != "" || s.info.Error != "" || s.info.Spec.Source != "" {
+		t.Fatalf("the session record survived the terminate: %+v", s.info)
+	}
+	if s.logs != nil {
+		t.Fatal("the session's log survived the terminate")
+	}
+	if s.device != "" {
+		t.Fatalf("the credential survived the terminate: %q", s.device)
+	}
+	if st := s.Status(); st != "choose a connection, or make a new one" {
+		t.Fatalf("the panel was left saying %q", st)
+	}
+	after, errAfter := s.Session()
+	if errAfter != nil {
+		t.Fatalf("the panel could not be read after the terminate: %v", errAfter)
+	}
+	if after.State != "" || after.Error != "" {
+		t.Fatalf("after the terminate the panel still reports %+v", after)
+	}
+	select {
+	case <-eventsClosed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the session's event stream was left open")
+	}
+}
+
+// Connecting to a host that is already sharing puts the viewer into what
+// is on its screen; connecting to a host with nothing to join — no
+// session, or only a failed one — starts a new one. Which branch ran is
+// read off the daemon: joining never asks it to start anything.
+func TestConnectJoinsWhatIsSharingAndStartsOverWhatIsNot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+
+	var mu sync.Mutex
+	var state string // "" (nothing), "live", "lost" — what GET /session says
+	var postGoesLive bool
+	var starts int
+	var attaches int
+	var streams sync.WaitGroup
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(api.PathSession, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			if state == "" {
+				http.Error(w, "no session is running on this daemon", http.StatusNotFound)
+				return
+			}
+			info := api.SessionInfo{State: state}
+			if state == api.StateLost {
+				info.Error = "the display broke"
+			}
+			_ = json.NewEncoder(w).Encode(info)
+		case http.MethodPost:
+			starts++
+			if postGoesLive {
+				state = api.StateLive // the fresh session comes up
+			}
+			_ = json.NewEncoder(w).Encode(api.SessionInfo{State: api.StateStarting})
+		case http.MethodDelete:
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		}
+	})
+	// Not a stream: enough to count that the viewer asked to attach. The
+	// refusal ends that dial; the client retries until its context ends,
+	// which the test's Terminate provides.
+	mux.HandleFunc(api.PathAttach, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attaches++
+		mu.Unlock()
+		http.Error(w, "no stream here", http.StatusNotImplemented)
+	})
+	// The event stream: the current state, said again every so often —
+	// a stand-in for the daemon's snapshot on subscribe and its state
+	// changes, close enough to drive the watcher.
+	mux.HandleFunc(api.PathEvents, func(w http.ResponseWriter, r *http.Request) {
+		streams.Add(1)
+		defer streams.Done()
+		fl, _ := w.(http.Flusher)
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			mu.Lock()
+			st := state
+			mu.Unlock()
+			if st == "" {
+				continue
+			}
+			b, _ := json.Marshal(api.Event{Type: "state", State: st})
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	store, err := profile.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := api.SessionSpec{Display: api.DisplaySpec{Kind: "existing", Name: ":0"}}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(profile.Profile{Name: "desk", Server: srv.Listener.Addr().String(), Spec: spec}); err != nil {
+		t.Fatal(err)
+	}
+	s := NewService(store, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			good := ok()
+			mu.Unlock()
+			if good {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("never saw %s", what)
+	}
+
+	// A session is already sharing: Connect joins it and the viewer asks
+	// to attach; the daemon is never asked to start anything.
+	state = api.StateLive
+	info, err := s.Connect("desk")
+	if err != nil {
+		t.Fatalf("connect to a sharing host: %v", err)
+	}
+	if info.State != api.StateLive {
+		t.Fatalf("the running session was not reported: %+v", info)
+	}
+	waitFor("an attach from the viewer", func() bool { return attaches > 0 })
+	mu.Lock()
+	joined := starts == 0
+	mu.Unlock()
+	if !joined {
+		t.Fatal("a host that was already sharing was asked to start a session")
+	}
+	if err := s.Terminate(); err != nil {
+		t.Fatalf("terminate: %v", err)
+	}
+
+	// A session that only failed is nothing to join: Connect starts over,
+	// and the failure stands the auto-viewer down — no attach follows.
+	state = api.StateLost
+	time.Sleep(300 * time.Millisecond) // let the first viewer's dial drain
+	mu.Lock()
+	attachedSoFar := attaches
+	mu.Unlock()
+	if _, err := s.Connect("desk"); err != nil {
+		t.Fatalf("connect to a failed session's host: %v", err)
+	}
+	waitFor("a fresh start", func() bool { return starts > 0 })
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	stoodDown := attaches == attachedSoFar
+	mu.Unlock()
+	if !stoodDown {
+		t.Fatal("a viewer was opened for a session that failed to start")
+	}
+	if err := s.Terminate(); err != nil {
+		t.Fatalf("terminate: %v", err)
+	}
+
+	// And with nothing there at all, Connect starts one — and opens the
+	// viewer in it as soon as it is live, without a click.
+	state = ""
+	postGoesLive = true
+	if _, err := s.Connect("desk"); err != nil {
+		t.Fatalf("connect to an idle host: %v", err)
+	}
+	waitFor("a second fresh start", func() bool { return starts > 1 })
+	waitFor("the viewer that opens itself", func() bool { return attaches > attachedSoFar })
+	if err := s.Terminate(); err != nil {
+		t.Fatalf("terminate: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		streams.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the session's event streams were left open")
+	}
+}
+
+// The window list is the daemon's answer, with the display asked for and
+// errors said out loud — what the editor's picker shows the person who
+// cannot read hex ids off xwininfo.
+func TestWindowsListsWhatTheDaemonShares(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	s := NewService(nil, "", nil)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(api.PathWindows, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("display") != ":0" {
+			http.Error(w, "which display?", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]api.WindowInfo{
+			{ID: "0x2a", Title: "xcalc", Class: "XCalc"},
+			{ID: "0x2b"},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+
+	wins, err := s.Windows(addr, "", "", ":0")
+	if err != nil {
+		t.Fatalf("windows: %v", err)
+	}
+	if len(wins) != 2 || wins[0].ID != "0x2a" || wins[0].Title != "xcalc" || wins[0].Class != "XCalc" {
+		t.Fatalf("the list did not come through: %+v", wins)
+	}
+	if _, err := s.Windows(addr, "", "", ":99"); err == nil {
+		t.Fatal("a display the daemon was not told about went unrefused")
 	}
 }

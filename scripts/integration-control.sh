@@ -10,7 +10,7 @@
 #   * a running session is never clobbered (409) unless replace is asked
 #   * replace stops the old session and starts the new spec
 #   * launching an application is refused unless the daemon allows it
-#   * terminate: the session is gone AND the service exits
+#   * terminate: the session is gone; the daemon keeps serving
 #   * events (SSE) reports the session's state changes
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -173,16 +173,31 @@ grep -q '"state"' "$SPEC/events" || {
 	exit 1
 }
 
-echo "== terminate stops the session and the service"
+echo "== terminate stops the session; the daemon keeps serving"
 ctl terminate
-for _ in $(seq 1 50); do
-	kill -0 "$SRV_PID" 2>/dev/null || break
-	sleep 0.2
-done
-if kill -0 "$SRV_PID" 2>/dev/null; then
-	echo "FAIL: the daemon kept running after terminate"
+if ! kill -0 "$SRV_PID" 2>/dev/null; then
+	echo "FAIL: the daemon stopped with the session"
 	exit 1
 fi
-SRV_PID=""
+if ctl session >"$SPEC/out" 2>&1; then
+	echo "FAIL: the daemon still reports a session after terminate"
+	cat "$SPEC/out"
+	exit 1
+fi
+grep -q "no session is running" "$SPEC/out" || {
+	echo "FAIL: the daemon did not say the session is gone"
+	cat "$SPEC/out"
+	exit 1
+}
+# A daemon that is still running takes the next session without a restart.
+ctl start -spec "$SPEC/replaced.json" -wait || {
+	echo "FAIL: the daemon would not take a session after terminate"
+	ctl session || true
+	exit 1
+}
+has "$(ctl session)" '"state": "live"' || {
+	echo "FAIL: the session after terminate is not live"
+	exit 1
+}
 
 echo "PASS: control API verified (idle, start, attach, detach, reattach, refuse, replace, events, terminate)"

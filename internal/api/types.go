@@ -101,22 +101,29 @@ const (
 // HostInfo is what a daemon says about itself: enough for a client to
 // fill in its option lists without guessing what the host has.
 type HostInfo struct {
-	ProtoVersion   int          `json:"protoVersion"`   // remmote stream protocol this daemon speaks
-	Codecs         []string     `json:"codecs"`         // what it can actually encode with
-	TLS            bool         `json:"tls"`            // the listener is encrypted
-	CanCreate      bool         `json:"canCreate"`      // it can create displays (Xvfb/Xephyr installed)
-	Displays       []string     `json:"displays"`       // displays that are up right now, e.g. ":0"
-	WindowManagers []string     `json:"windowManagers"` // window managers installed here, best first
-	AllowExec      bool         `json:"allowExec"`      // launching an app is permitted
-	Session        *SessionInfo `json:"session,omitempty"`
+	ProtoVersion   int      `json:"protoVersion"`   // remmote stream protocol this daemon speaks
+	Codecs         []string `json:"codecs"`         // what it can actually encode with
+	TLS            bool     `json:"tls"`            // the listener is encrypted
+	CanCreate      bool     `json:"canCreate"`      // it can create displays (Xvfb/Xephyr installed)
+	Displays       []string `json:"displays"`       // displays that are up right now, e.g. ":0"
+	WindowManagers []string `json:"windowManagers"` // window managers installed here, best first
+	AllowExec      bool     `json:"allowExec"`      // launching an app is permitted
+	// AllowExecCommands is the permitted list as it was configured —
+	// what a source-"app" command may be chosen from. "*" means
+	// anything, which no picker can enumerate.
+	AllowExecCommands []string     `json:"allowExecCommands,omitempty"`
+	Session           *SessionInfo `json:"session,omitempty"`
 }
 
 // Session states. "lost" is a session that failed to start or has ended:
 // its record, error and log stay until replaced or the service stops.
+// "stopped" is the state of having none: a terminated session, with the
+// daemon still running.
 const (
 	StateStarting = "starting"
 	StateLive     = "live"
 	StateLost     = "lost"
+	StateStopped  = "stopped"
 )
 
 // SessionInfo is the session as the daemon sees it: the spec in force,

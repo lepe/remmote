@@ -31,6 +31,8 @@ import (
 	"github.com/lepe/remmote/internal/proto"
 	"github.com/lepe/remmote/internal/stream"
 	"github.com/lepe/remmote/internal/tlsutil"
+	"github.com/lepe/remmote/internal/xconn"
+	"github.com/lepe/remmote/internal/xwin"
 )
 
 // Options configures the daemon.
@@ -119,9 +121,10 @@ func New(opts Options) (*Daemon, error) {
 	return d, nil
 }
 
-// Run serves until ctx is canceled or the session is terminated, then
-// tears everything down. A deliberate terminate returns nil: the service
-// stops because it was asked to, not because it broke.
+// Run serves until ctx is canceled, then tears everything down. A
+// deliberate cancel returns nil: the service stops because it was asked
+// to, not because it broke. Terminating a session is not asking this —
+// the session ends and the daemon stays, ready for the next one.
 func (d *Daemon) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -230,6 +233,7 @@ func (d *Daemon) mux() *http.ServeMux {
 	mux.HandleFunc("POST "+api.PathSession, d.handleSessionPost)
 	mux.HandleFunc("DELETE "+api.PathSession, d.handleSessionDelete)
 	mux.HandleFunc("GET "+api.PathEvents, d.handleEvents)
+	mux.HandleFunc("GET "+api.PathWindows, d.handleWindows)
 	mux.HandleFunc("POST "+api.PathAttach, d.handleAttach)
 	mux.HandleFunc("POST "+api.PathPair, d.handlePair)
 	mux.HandleFunc("POST "+api.PathPairCodes, d.handlePairCode)
@@ -420,13 +424,14 @@ func (d *Daemon) handleHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h := api.HostInfo{
-		ProtoVersion:   int(proto.ProtoVersion),
-		Codecs:         api.Codecs(),
-		TLS:            d.opts.TLS,
-		CanCreate:      hostenv.Available(),
-		Displays:       hostenv.DisplayNames(),
-		WindowManagers: hostenv.WMs(),
-		AllowExec:      len(d.opts.AllowExec) > 0,
+		ProtoVersion:      int(proto.ProtoVersion),
+		Codecs:            api.Codecs(),
+		TLS:               d.opts.TLS,
+		CanCreate:         hostenv.Available(),
+		Displays:          hostenv.DisplayNames(),
+		WindowManagers:    hostenv.WMs(),
+		AllowExec:         len(d.opts.AllowExec) > 0,
+		AllowExecCommands: d.opts.AllowExec,
 	}
 	d.mu.Lock()
 	if d.sess != nil {
@@ -504,21 +509,74 @@ func (d *Daemon) handleSessionPost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
-// handleSessionDelete is the deliberate end: the session stops and the
-// service with it. The response goes out first — the daemon exits once
-// it has been delivered.
+// handleSessionDelete is the deliberate end of the session: it stops —
+// display, application, stream, all of it released — and the daemon
+// stays up, ready for the next one. Stopping the service itself is the
+// operator's act on the host, not something a client asks for.
 func (d *Daemon) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 	if !d.require(w, r, auth.RoleControl) {
 		return
 	}
 	d.stopSession()
 	d.audit(r, "session.terminate")
-	d.log.Info("session terminated by request; stopping the service")
+	d.log.Info("session terminated by request; the daemon keeps running")
+	d.ring.Publish(api.Event{Type: "state", State: api.StateStopped, Time: time.Now()})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	if fl, ok := w.(http.Flusher); ok {
 		fl.Flush()
 	}
-	go d.cancel()
+}
+
+// handleWindows lists the windows on one of this host's displays — what
+// a session with source "window" has to choose from. Reading titles is
+// what a viewer could watch anyway, so view role is enough.
+func (d *Daemon) handleWindows(w http.ResponseWriter, r *http.Request) {
+	if !d.require(w, r, auth.RoleView) {
+		return
+	}
+	display := r.URL.Query().Get("display")
+	if display == "" {
+		apiError(w, http.StatusBadRequest, "the display to list is needed (?display=:0)")
+		return
+	}
+	windows, err := listWindows(display)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, windows)
+}
+
+// listWindows walks the display's window tree for the shareable clients:
+// the ones a window manager manages (WM_STATE), named by WM_NAME or, for
+// the unnamed, by their WM_CLASS.
+func listWindows(display string) ([]api.WindowInfo, error) {
+	xc, err := xconn.Dial(display)
+	if err != nil {
+		return nil, err
+	}
+	defer xc.Close()
+	q := xwin.NewClient(xc.X, xc.Root())
+	var out []api.WindowInfo
+	for _, w := range q.Tree() {
+		if !q.HasWMState(w) {
+			continue // frames and decorations are not clients to share
+		}
+		title, _ := q.WMName(w)
+		_, class, _ := q.WMClass(w)
+		if title == "" {
+			title = class
+		}
+		if title == "" {
+			title = fmt.Sprintf("0x%x", uint32(w))
+		}
+		out = append(out, api.WindowInfo{
+			ID:    fmt.Sprintf("0x%x", uint32(w)),
+			Title: title,
+			Class: class,
+		})
+	}
+	return out, nil
 }
 
 // handleEvents streams state changes and log lines as SSE.

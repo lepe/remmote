@@ -65,15 +65,21 @@
       <span class="field-label" id="source-label">Share</span>
       <div class="row source-options" id="e-source" role="radiogroup" aria-labelledby="source-label">
         <label class="radio"><input type="radio" name="source" value="desktop"> Desktop</label>
-        <label class="radio"><input type="radio" name="source" value="app"> Application</label>
+        <label class="radio" id="e-app-radio-label"><input type="radio" name="source" value="app"> Application</label>
         <label class="radio"><input type="radio" name="source" value="window"> Window</label>
       </div>
 
       <div class="only-app grid">
-        <label for="e-app">Command</label> <input id="e-app" placeholder="xcalc">
+        <label for="e-applist" id="e-applist-label" class="hidden">Command</label>
+        <select id="e-applist" class="hidden"></select>
+        <label for="e-app" id="e-app-label">Command</label> <input id="e-app" placeholder="xcalc">
       </div>
       <div class="only-window grid">
-        <label for="e-window">Window ID</label> <input id="e-window" placeholder="0x3400007 (from xwininfo)">
+        <label for="e-windowdisplay">Display</label>
+        <select id="e-windowdisplay"></select>
+        <label for="e-windowlist">Window</label>
+        <select id="e-windowlist"><option value="">pick a running window…</option></select>
+        <input type="hidden" id="e-window">
       </div>
       <div class="not-desktop"><span></span>
         <label class="check"><input type="checkbox" id="e-maximize"> maximize on the host screen</label>

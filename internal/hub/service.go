@@ -25,8 +25,8 @@ import (
 // actions stay available to anything else that wants them.
 //
 // The session lives on the host; this is a view onto it. Closing the
-// viewer detaches and nothing more, and stopping a session is a
-// deliberate act that stops the daemon too.
+// viewer detaches and nothing more, and terminating a session ends it —
+// the daemon stays up, ready for the next one.
 type Service struct {
 	store   *profile.Store
 	log     *slog.Logger
@@ -35,12 +35,14 @@ type Service struct {
 	mu         sync.Mutex
 	device     string // the credential this machine reached the host with
 	conn       *api.Client
+	connName   string // the connection the session came from
 	info       api.SessionInfo
 	logs       []string
 	status     string
 	viewing    bool
 	viewerStop context.CancelFunc
 	watchStop  func()
+	autoView   bool // open the viewer as soon as the session is live
 	push       func(api.Event)
 }
 
@@ -115,9 +117,14 @@ func (s *Service) Save(d draft) error {
 // Delete forgets a connection.
 func (s *Service) Delete(name string) error { return s.store.Delete(name) }
 
-// Connect starts the selected connection's session — or joins the one
-// already running on that host. The panel shows what is really there;
-// changing it is a separate, deliberate act.
+// Connect puts this machine back into the selected connection's
+// session: one already sharing on the host — the one this machine
+// detached from, most likely — is the one the viewer opens in, and only
+// when there is none does Connect start a new one. Either way the viewer
+// opens by itself: at once for a session that is live, as soon as it is
+// live for one that is still starting. A session that merely failed is
+// not a session to join: connecting starts over, which is the retry.
+// Changing what is shared stays a separate, deliberate act.
 func (s *Service) Connect(name string) (api.SessionInfo, error) {
 	p, err := s.store.Get(name)
 	if err != nil {
@@ -136,6 +143,8 @@ func (s *Service) Connect(name string) (api.SessionInfo, error) {
 		s.watchStop()
 	}
 	s.conn = c
+	s.connName = name
+	s.autoView = false // this connect decides, not the one before it
 	s.info = api.SessionInfo{State: api.StateStarting, Spec: p.Spec}
 	s.status = "connecting to " + p.Server + "…"
 	s.logs = nil
@@ -146,12 +155,25 @@ func (s *Service) Connect(name string) (api.SessionInfo, error) {
 	switch {
 	case err != nil:
 		return s.fail(explain(err, p.Server))
-	case info != nil:
+	case info != nil && (info.State == api.StateStarting || info.State == api.StateLive):
 		s.mu.Lock()
 		s.info = *info
 		s.status = "a session is already running on this host"
+		waitForLive := info.State == api.StateStarting
+		if waitForLive {
+			s.autoView = true
+		}
 		s.mu.Unlock()
 		s.watch()
+		if waitForLive {
+			return *info, nil // the watcher opens the viewer when it is live
+		}
+		if err := s.OpenViewer(name); err != nil {
+			// The session is real and joined; a viewer that could not
+			// open is a detail for the log, not a failed Connect — the
+			// button is still there.
+			s.log.Info("the host is sharing but the viewer did not open", "err", err)
+		}
 		return *info, nil
 	}
 	started, err := c.Start(ctx, p.Spec, false)
@@ -161,6 +183,7 @@ func (s *Service) Connect(name string) (api.SessionInfo, error) {
 	s.mu.Lock()
 	s.info = *started
 	s.status = "starting…"
+	s.autoView = true
 	s.mu.Unlock()
 	s.watch()
 	return *started, nil
@@ -218,16 +241,32 @@ func (s *Service) Viewing() bool {
 	return s.viewing
 }
 
-// Terminate ends the session and stops the daemon with it — the
-// deliberate end of the host's sharing.
+// Terminate ends the session on the host — the deliberate end of the
+// sharing. The daemon keeps running, ready for the next one, and this
+// machine's panel goes back to how it was before the connection was
+// made.
 func (s *Service) Terminate() error {
 	s.mu.Lock()
-	conn, stop := s.conn, s.viewerStop
-	s.info = api.SessionInfo{State: "stopped"}
-	s.status = "terminated; the daemon has stopped"
+	conn, stop, watch, push := s.conn, s.viewerStop, s.watchStop, s.push
+	s.conn, s.viewerStop, s.watchStop = nil, nil, nil
+	s.device = ""
+	s.connName = ""
+	s.autoView = false
+	s.info = api.SessionInfo{}
+	s.logs = nil
+	s.status = "choose a connection, or make a new one"
 	s.mu.Unlock()
+	// The viewer's and the watcher's goroutines end against the state
+	// above: with conn gone, neither has anything to say about the
+	// session any more.
 	if stop != nil {
 		stop()
+	}
+	if watch != nil {
+		watch()
+	}
+	if push != nil {
+		push(api.Event{Type: "state"}) // the panel re-reads everything
 	}
 	if conn == nil {
 		return nil
@@ -262,10 +301,13 @@ func (s *Service) OpenViewer(name string) error {
 		defer func() {
 			s.mu.Lock()
 			s.viewing = false
-			s.status = "detached; the session is still running"
+			detached := s.conn != nil // a terminated session leaves nothing to detach from
+			if detached {
+				s.status = "detached; the session is still running"
+			}
 			push := s.push
 			s.mu.Unlock()
-			if push != nil {
+			if detached && push != nil {
 				push(api.Event{Type: "state", State: api.StateLive})
 			}
 		}()
@@ -311,20 +353,44 @@ func (s *Service) watch() {
 	go func() {
 		for ev := range events {
 			s.mu.Lock()
+			// A terminated connection keeps no view: whatever is still in
+			// flight on the channel belongs to a panel that is gone.
+			if s.conn == nil {
+				s.mu.Unlock()
+				continue
+			}
 			if ev.Type == "log" {
 				s.logs = append(s.logs, ev.Line)
 				if len(s.logs) > 200 {
 					s.logs = s.logs[len(s.logs)-200:]
 				}
 			}
+			openIt := false
 			switch ev.State {
 			case api.StateLive:
-				s.status = "live — open the viewer, or leave this and come back"
+				if !s.viewing {
+					s.status = "live — open the viewer, or leave this and come back"
+				}
+				if s.autoView {
+					s.autoView = false
+					openIt = true
+				}
 			case api.StateLost:
 				s.status = "the session failed; the log says why"
+				s.autoView = false // a failed session is nothing to open
+			case api.StateStopped:
+				s.info.State = api.StateStopped
+				s.status = "terminated; the daemon is still running"
+				s.autoView = false
 			}
+			name := s.connName
 			push := s.push
 			s.mu.Unlock()
+			if openIt && name != "" {
+				if err := s.OpenViewer(name); err != nil {
+					s.log.Info("the session is live but the viewer did not open", "err", err)
+				}
+			}
 			if push != nil {
 				push(ev)
 			}
@@ -346,6 +412,21 @@ func (s *Service) Host(server, identityName, tlsValue string) (api.HostInfo, err
 		return api.HostInfo{}, explain(err, server)
 	}
 	return *h, nil
+}
+
+// Windows asks a daemon what is shareable on one of its displays: the
+// list a source-"window" connection picks from, named by what the
+// windows call themselves.
+func (s *Service) Windows(server, identityName, tlsValue, display string) ([]api.WindowInfo, error) {
+	c, _, err := link(server, tlsValue, identityName)
+	if err != nil {
+		return nil, explain(err, server)
+	}
+	list, err := c.Windows(context.Background(), display)
+	if err != nil {
+		return nil, explain(err, server)
+	}
+	return list, nil
 }
 
 // Pair exchanges a pairing code for this machine's credential, and keeps
@@ -793,15 +874,37 @@ func credentialNames() []string {
 
 // viewerTLS is the link the viewer window opens with: the credential the
 // host accepted, or the profile's -tls value when it wanted none.
+//
+// A host this machine paired with is reached the way it was paired, the
+// same decision deviceClient makes for the control link: pinned to the
+// certificate pairing learned, or not encrypted at all. The name in the
+// address decides nothing — a host dialed by an address its certificate
+// does not cover is still the host it said it was when pairing vouched
+// for that certificate — so the viewer does not check the one thing the
+// control link never checked either.
 func viewerTLS(p profile.Profile, device string) (*tls.Config, error) {
-	if device != "" {
-		id, err := auth.LoadIdentity(auth.DefaultIdentityDir(device))
-		if err != nil {
-			return nil, err
-		}
-		return id.TLSConfig(p.Server)
+	if device == "" {
+		return tlsValueConfig(p.TLS)
 	}
-	return tlsValueConfig(p.TLS)
+	rec, paired := deviceRecordForServer(p.Server, device)
+	if paired && !rec.Encrypted {
+		return nil, nil // no TLS at all: the unsafe option is none
+	}
+	id, err := auth.LoadIdentity(auth.DefaultIdentityDir(device))
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := id.TLSConfig(p.Server)
+	if err != nil {
+		return nil, err
+	}
+	if !paired {
+		// No record to check against: the credential's own CA decides.
+		return cfg, nil
+	}
+	// A pin that cannot be used is a failure to report, never a reason to
+	// reach the host with less checking than pairing established.
+	return tlsutil.Pin(cfg, rec.Fingerprint)
 }
 
 // roleRank is what a role can do, as a number.

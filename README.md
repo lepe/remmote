@@ -147,9 +147,13 @@ Or let the client ask: **`./bin/remmote-hub` opens the connection
 manager** — a window with the connections you have saved, a form for
 what to share, a panel for whatever is running right now, and the list
 of paired devices. `Enter` connects; `e` edits; `n` makes a new one.
-Closing the viewer's window detaches and nothing more — the session goes
-on, and opening the viewer again picks it up. Stopping a session is a
-deliberate act on the panel, and it stops the daemon too. Connections
+Connecting puts you back in what the host is sharing — the viewer opens
+in a session that is already running, and a host with nothing to join
+gets a new one, whose viewer opens as soon as it is live. Closing the
+viewer's window detaches and nothing
+more — the session goes on, and connecting again picks it up.
+Terminating a session is a deliberate act on the panel: the session
+ends, and the daemon stays up for the next one. Connections
 are saved in `~/.config/remmote/profiles.d/` (one JSON file each,
 hand-editable). (`remmote-client` with no `-server` launches the manager
 for you when it is installed.)
@@ -160,8 +164,9 @@ for you when it is installed.)
 viewer. Closing the viewer window *detaches*: the display, the
 application and the capture keep running, and a viewer can attach again
 at any time (that is the point of leaving it running). Ending the
-session is deliberate: `remmote-ctl terminate` stops the session and
-the service with it.
+session is deliberate: `remmote-ctl terminate` stops the session — the
+display, the application, the capture — and the daemon stays up, ready
+for the next one.
 
 The flags above describe the session shared **at startup**. A client can
 also say what to share, at any time, over the control API — `remmote-ctl
@@ -172,7 +177,10 @@ daemon.
 Launching an application on request (`source: "app"`) is refused by
 default: the daemon will share displays and windows that already exist,
 but running a program on the host is the operator's decision — start it
-with `-allow-exec xcalc,xterm` to permit those commands.
+with `-allow-exec xcalc,xterm` to permit those commands, or keep the
+list in a text file (one command per line, `#` comments) and point
+`-allow-exec-file /etc/remmote/allowed-apps.txt` at it. Matching is by
+command basename; `*` permits everything.
 
 ```sh
 # a daemon that waits for a client to say what to share
@@ -310,6 +318,7 @@ keyframe (2 s).
 | `-listen` | `:7677` | TCP listen address — the control API and the streams share it |
 | `-idle` | off | share nothing at startup; wait for a client to say what to share |
 | `-allow-exec` | — | comma-separated commands clients may launch (`source: app`); empty refuses them all. A session started from these flags is never restricted |
+| `-allow-exec-file` | — | text file of commands clients may launch, one per line (`#` comments, `*` for all); adds to `-allow-exec`. A file that cannot be read stops the daemon at startup |
 | `-auth` | off | admit only **paired devices** — each named, roled and revocable — with its own TLS (the authority signs the daemon's certificate too) |
 | `-auth-dir` | `~/.config/remmote/daemon` | with `-auth`: where the authority, its roster and the current pairing code live |
 | `-insecure` | off | allow an unencrypted listener that is not loopback-only (never on a shared network) |
@@ -560,11 +569,12 @@ Control is JSON over HTTP/1.1 on the same port as the stream (HTTPS with
 
 | Request | Meaning |
 |---|---|
-| `GET /api/v1/host` | what this daemon can do: protocol version, codecs, TLS, whether it may create displays or launch apps, the running session |
+| `GET /api/v1/host` | what this daemon can do: protocol version, codecs, TLS, whether it may create displays or launch apps (naming which commands), the running session |
 | `GET /api/v1/session` | the running session: state, spec in force, screen size, app pid, error and log tail (`404` when none) |
 | `POST /api/v1/session` | start a session from a JSON `SessionSpec` (`409` when one is running; `?replace=1` stops it first) |
-| `DELETE /api/v1/session` | terminate the session **and** the service |
+| `DELETE /api/v1/session` | terminate the session (the service keeps running) |
 | `GET /api/v1/events` | SSE: state changes and log lines as the session starts and runs |
+| `GET /api/v1/windows?display=:0` | the shareable windows on a display: hex id, title, class — what source `window` picks from |
 | `POST /api/v1/attach` | `Upgrade: remmote` → `101 Switching Protocols`, then the raw stream below |
 | `POST /api/v1/pair` | exchange a pairing code for a device certificate (the only call an unpaired device may make) |
 | `POST /api/v1/pair-codes` | mint a pairing code for a role (admin) |
@@ -730,8 +740,9 @@ loginctl enable-linger $USER
 The pairing code for the first device is in the log
 (`journalctl --user -u remmote-server | grep 'pair a device'`) and in
 `~/.config/remmote/daemon/pairing-code`. `Restart=on-failure` keeps it
-up when it breaks — and leaves it down when a session is terminated on
-purpose, which is how the daemon is meant to end.
+up when it breaks. Terminating a session never stops it — ending the
+service is the host operator's own act: `systemctl --user stop
+remmote-server`, or a signal.
 
 ### Stopping
 

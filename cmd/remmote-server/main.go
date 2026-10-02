@@ -2,7 +2,7 @@
 // control API on one port — a client says what to share, or the flags
 // below decide it at startup — and viewers attach over the same port.
 // The session lives here: closing a viewer window detaches, terminating
-// a session stops this service.
+// a session ends the session, and the daemon stays up for the next one.
 //
 // WARNING: without -tls there is no authentication and no encryption.
 package main
@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -28,30 +29,31 @@ import (
 
 func main() {
 	var (
-		display     = flag.String("display", os.Getenv("DISPLAY"), "X display to capture and control")
-		listen      = flag.String("listen", ":7677", "TCP listen address (control API and streams)")
-		fps         = flag.Int("fps", 60, "max frames per second (damage merge window)")
-		downscale   = flag.Int("downscale", 1, "divide stream width/height by 1, 2 or 4 (less detail, lower CPU/bandwidth)")
-		codec       = flag.String("codec", "hybrid", "image codec: hybrid (zstd raw + JPEG fallback, default) | zraw | jpeg | webp (webp requires a -tags webp build)")
-		quality     = flag.Int("quality", 75, "JPEG/WebP quality 1-100; ZRAW is lossless (client may override)")
-		refresh     = flag.Duration("refresh", 2*time.Second, "periodic full-frame keyframe interval")
-		dumpFrame   = flag.String("dump-frame", "", "capture one frame to this PNG path and exit")
-		testInj     = flag.Bool("test-inject", false, "inject a pointer move and a keystroke, then exit")
-		noClipboard = flag.Bool("no-clipboard", false, "disable clipboard synchronization")
-		execCmd     = flag.String("exec", "", "run this command and share only its windows (e.g. -exec xcalc)")
-		windowID    = flag.String("window", "", "share this existing window id (hex) and windows it spawns")
-		maximize    = flag.Bool("maximize", false, "with -exec/-window: maximize the shared window on the host screen")
-		resizeDesk  = flag.Bool("resize-desktop", false, "whole-desktop mode: let a viewer resizing its window resize the host screen too (best effort via RANDR)")
-		idle        = flag.Bool("idle", false, "share nothing at startup; wait for a client to say what to share")
-		allowExec   = flag.String("allow-exec", "", "comma-separated commands clients may launch (source app); empty refuses them all")
-		useAuth     = flag.Bool("auth", false, "admit only paired devices — each named, roled and revocable; brings its own TLS")
-		authDir     = flag.String("auth-dir", "", "with -auth: where the authority and its roster live (default ~/.config/remmote/daemon)")
-		insecure    = flag.Bool("insecure", false, "allow an unencrypted listener that is not loopback-only (never on a shared network)")
-		useTLS      = flag.String("tls", "off", "encrypt the listener: 'auto' (or no value) to generate and print a certificate fingerprint, a shared secret both sides pass, or SHA256:… to assert the -tls-cert certificate")
-		tlsCert     = flag.String("tls-cert", "", "with -tls: PEM certificate to use (default: generate and cache one)")
-		tlsKey      = flag.String("tls-key", "", "with -tls: PEM private key to use (default: generate and cache one)")
-		verbose     = flag.Bool("v", false, "debug logging")
-		logJSON     = flag.Bool("log-json", false, "JSON log output")
+		display       = flag.String("display", os.Getenv("DISPLAY"), "X display to capture and control")
+		listen        = flag.String("listen", ":7677", "TCP listen address (control API and streams)")
+		fps           = flag.Int("fps", 60, "max frames per second (damage merge window)")
+		downscale     = flag.Int("downscale", 1, "divide stream width/height by 1, 2 or 4 (less detail, lower CPU/bandwidth)")
+		codec         = flag.String("codec", "hybrid", "image codec: hybrid (zstd raw + JPEG fallback, default) | zraw | jpeg | webp (webp requires a -tags webp build)")
+		quality       = flag.Int("quality", 75, "JPEG/WebP quality 1-100; ZRAW is lossless (client may override)")
+		refresh       = flag.Duration("refresh", 2*time.Second, "periodic full-frame keyframe interval")
+		dumpFrame     = flag.String("dump-frame", "", "capture one frame to this PNG path and exit")
+		testInj       = flag.Bool("test-inject", false, "inject a pointer move and a keystroke, then exit")
+		noClipboard   = flag.Bool("no-clipboard", false, "disable clipboard synchronization")
+		execCmd       = flag.String("exec", "", "run this command and share only its windows (e.g. -exec xcalc)")
+		windowID      = flag.String("window", "", "share this existing window id (hex) and windows it spawns")
+		maximize      = flag.Bool("maximize", false, "with -exec/-window: maximize the shared window on the host screen")
+		resizeDesk    = flag.Bool("resize-desktop", false, "whole-desktop mode: let a viewer resizing its window resize the host screen too (best effort via RANDR)")
+		idle          = flag.Bool("idle", false, "share nothing at startup; wait for a client to say what to share")
+		allowExec     = flag.String("allow-exec", "", "comma-separated commands clients may launch (source app); empty refuses them all")
+		allowExecFile = flag.String("allow-exec-file", "", "text file of commands clients may launch, one per line (# comments); adds to -allow-exec")
+		useAuth       = flag.Bool("auth", false, "admit only paired devices — each named, roled and revocable; brings its own TLS")
+		authDir       = flag.String("auth-dir", "", "with -auth: where the authority and its roster live (default ~/.config/remmote/daemon)")
+		insecure      = flag.Bool("insecure", false, "allow an unencrypted listener that is not loopback-only (never on a shared network)")
+		useTLS        = flag.String("tls", "off", "encrypt the listener: 'auto' (or no value) to generate and print a certificate fingerprint, a shared secret both sides pass, or SHA256:… to assert the -tls-cert certificate")
+		tlsCert       = flag.String("tls-cert", "", "with -tls: PEM certificate to use (default: generate and cache one)")
+		tlsKey        = flag.String("tls-key", "", "with -tls: PEM private key to use (default: generate and cache one)")
+		verbose       = flag.Bool("v", false, "debug logging")
+		logJSON       = flag.Bool("log-json", false, "JSON log output")
 	)
 	// -tls takes an optional value, which the flag package cannot express on
 	// its own: reshape the arguments first (see tlsutil.NormalizeArgs).
@@ -163,13 +165,23 @@ func main() {
 		return
 	}
 
+	allow := splitList(*allowExec)
+	if *allowExecFile != "" {
+		fromFile, err := daemon.LoadAllowList(*allowExecFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "remmote-server:", err)
+			os.Exit(1)
+		}
+		allow = append(allow, fromFile...)
+	}
+
 	dopts := daemon.Options{
 		ListenAddr:  *listen,
 		TLS:         tlsutil.On(*useTLS),
 		TLSValue:    *useTLS,
 		TLSCertFile: *tlsCert,
 		TLSKeyFile:  *tlsKey,
-		AllowExec:   splitList(*allowExec),
+		AllowExec:   allow,
 		Insecure:    *insecure,
 		Log:         log,
 	}

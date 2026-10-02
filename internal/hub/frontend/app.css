@@ -212,3 +212,6 @@ fieldset:disabled input, fieldset:disabled select { cursor: default; }
 .warning { grid-column: 1 / -1; margin: 0; padding: 11px 14px; border-radius: 8px;
   border: 1px solid #5c4a2c; border-left: 3px solid var(--warn); background: #2b2418;
   color: var(--warn); font-size: 12px; line-height: 1.55; }
+
+/* The window picker: list on the left of its label, refresh beside it. */
+.only-window select { min-width: 0; }

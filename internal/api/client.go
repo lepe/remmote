@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ const (
 	PathSession   = "/api/v1/session"
 	PathEvents    = "/api/v1/events"
 	PathAttach    = "/api/v1/attach"
+	PathWindows   = "/api/v1/windows"
 	PathPair      = "/api/v1/pair"
 	PathPairCodes = "/api/v1/pair-codes"
 	PathClients   = "/api/v1/clients"
@@ -134,8 +136,34 @@ func (c *Client) Start(ctx context.Context, spec SessionSpec, replace bool) (*Se
 	return &s, nil
 }
 
-// Terminate stops the session and the daemon with it: this is the
-// deliberate end of the host's sharing, not a disconnect.
+// WindowInfo is one window on a daemon's display that a session with
+// source "window" can share.
+type WindowInfo struct {
+	ID    string `json:"id"`              // hex window id, as WindowSpec.ID wants it
+	Title string `json:"title"`           // WM_NAME, or the class when unnamed
+	Class string `json:"class,omitempty"` // WM_CLASS res_class
+}
+
+// Windows lists the windows on one of the daemon's displays — the
+// choices a source-"window" session has. Titles are whatever the
+// window's WM_NAME says.
+func (c *Client) Windows(ctx context.Context, display string) ([]WindowInfo, error) {
+	q := url.Values{}
+	q.Set("display", display)
+	resp, err := c.do(ctx, http.MethodGet, PathWindows+"?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var list []WindowInfo
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
+	return list, nil
+}
+
+// Terminate stops the running session. The daemon keeps running, ready
+// for the next one: ending the sharing is not ending the service.
 func (c *Client) Terminate(ctx context.Context) error {
 	resp, err := c.do(ctx, http.MethodDelete, PathSession, nil)
 	if err != nil {

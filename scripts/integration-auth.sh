@@ -174,16 +174,21 @@ if ./bin/remmote-server -idle -listen "0.0.0.0:$((PORT + 1))" >"$SPEC/out" 2>&1;
 fi
 grep -q "refusing to serve" "$SPEC/out" || { echo "FAIL: the refusal did not say why"; cat "$SPEC/out"; exit 1; }
 
-echo "== terminate: the operator may"
+echo "== terminate: the operator may end the session (the daemon keeps serving)"
 IDC operator terminate
-for _ in $(seq 1 50); do
-	kill -0 "$SRV_PID" 2>/dev/null || break
-	sleep 0.2
-done
-if kill -0 "$SRV_PID" 2>/dev/null; then
-	echo "FAIL: the daemon kept running after terminate"
+if ! kill -0 "$SRV_PID" 2>/dev/null; then
+	echo "FAIL: the daemon stopped with the session"
 	exit 1
 fi
-SRV_PID=""
+if IDC operator session >"$SPEC/out" 2>&1; then
+	echo "FAIL: the daemon still reports a session after terminate"
+	cat "$SPEC/out"
+	exit 1
+fi
+grep -q "no session is running" "$SPEC/out" || {
+	echo "FAIL: the daemon did not say the session is gone"
+	cat "$SPEC/out"
+	exit 1
+}
 
 echo "PASS: paired-device admission verified (pair, refuse, roles, revoke, stream, door)"

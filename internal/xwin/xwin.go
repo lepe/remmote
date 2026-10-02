@@ -92,6 +92,17 @@ func (c *Client) WMClass(w xproto.Window) (instance, class string, ok bool) {
 	return instance, class, instance != "" || class != ""
 }
 
+// WMName returns the window's WM_NAME — the title a window list shows.
+// The property is STRING or UTF8_STRING; both read as bytes here, which
+// is exact for the common case and close enough for a picker on the rest.
+func (c *Client) WMName(w xproto.Window) (string, bool) {
+	data, typ, err := c.prop(w, "WM_NAME")
+	if err != nil || typ == 0 || len(data) == 0 {
+		return "", false
+	}
+	return string(data), true
+}
+
 // HasWMState reports whether the window carries WM_STATE — the EWMH mark
 // of a WM-managed client window (as opposed to a frame or decoration).
 func (c *Client) HasWMState(w xproto.Window) bool {
