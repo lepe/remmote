@@ -31,16 +31,22 @@ import (
 	"github.com/lepe/remmote/internal/api"
 	"github.com/lepe/remmote/internal/auth"
 	"github.com/lepe/remmote/internal/tlsutil"
+	"github.com/lepe/remmote/internal/version"
 )
 
 func main() {
 	global := flag.NewFlagSet("remmote-ctl", flag.ExitOnError)
 	server := global.String("server", "127.0.0.1:7677", "daemon address host:port")
 	useTLS := global.String("tls", "off", "encryption: 'auto' (or no value), the daemon's shared secret, or SHA256:… to pin its certificate")
+	showVersion := global.Bool("version", false, "print version and exit")
 	identity := global.String("identity", "", "authenticate as this paired device (its credential lives in ~/.config/remmote/credentials/<name>)")
 	global.Usage = usage
 	// -tls takes an optional value; reshape the arguments first.
 	global.Parse(tlsutil.NormalizeArgs(os.Args[1:]))
+	if *showVersion {
+		fmt.Printf("remmote-ctl %s\n", version.Version)
+		return
+	}
 
 	args := global.Args()
 	if len(args) == 0 {

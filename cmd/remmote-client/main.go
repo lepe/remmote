@@ -16,6 +16,7 @@ import (
 	"github.com/lepe/remmote/internal/auth"
 	"github.com/lepe/remmote/internal/client"
 	"github.com/lepe/remmote/internal/tlsutil"
+	"github.com/lepe/remmote/internal/version"
 )
 
 func main() {
@@ -33,10 +34,15 @@ func main() {
 		noClipboard = flag.Bool("no-clipboard", false, "disable clipboard synchronization")
 		verbose     = flag.Bool("v", false, "debug logging")
 		logJSON     = flag.Bool("log-json", false, "JSON log output")
+		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	// -tls takes an optional value, which the flag package cannot express on
 	// its own: reshape the arguments first (see tlsutil.NormalizeArgs).
 	flag.CommandLine.Parse(tlsutil.NormalizeArgs(os.Args[1:]))
+	if *showVersion {
+		fmt.Printf("remmote-client %s\n", version.Version)
+		return
+	}
 
 	if *server == "" {
 		// Nothing named: the connection manager is the way in. It is its

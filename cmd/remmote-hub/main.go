@@ -24,15 +24,21 @@ import (
 
 	"github.com/lepe/remmote/internal/hub"
 	"github.com/lepe/remmote/internal/profile"
+	"github.com/lepe/remmote/internal/version"
 )
 
 func main() {
 	var (
-		display = flag.String("display", os.Getenv("DISPLAY"), "X display for the viewer window")
-		verbose = flag.Bool("v", false, "debug logging")
-		logJSON = flag.Bool("log-json", false, "JSON log output")
+		display     = flag.String("display", os.Getenv("DISPLAY"), "X display for the viewer window")
+		verbose     = flag.Bool("v", false, "debug logging")
+		logJSON     = flag.Bool("log-json", false, "JSON log output")
+		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("remmote-hub %s\n", version.Version)
+		return
+	}
 
 	level := slog.LevelInfo
 	if *verbose {
@@ -54,7 +60,7 @@ func main() {
 	app := hub.NewApp(hub.NewService(store, *display, log))
 
 	if err := wails.Run(&options.App{
-		Title:            "remmote",
+		Title:            app.Title(),
 		Width:            900,
 		Height:           640,
 		MinWidth:         720,

@@ -24,6 +24,7 @@ import (
 	"github.com/lepe/remmote/internal/daemon"
 	"github.com/lepe/remmote/internal/stream"
 	"github.com/lepe/remmote/internal/tlsutil"
+	"github.com/lepe/remmote/internal/version"
 	"github.com/lepe/remmote/internal/xconn"
 )
 
@@ -54,10 +55,15 @@ func main() {
 		tlsKey        = flag.String("tls-key", "", "with -tls: PEM private key to use (default: generate and cache one)")
 		verbose       = flag.Bool("v", false, "debug logging")
 		logJSON       = flag.Bool("log-json", false, "JSON log output")
+		showVersion   = flag.Bool("version", false, "print version and exit")
 	)
 	// -tls takes an optional value, which the flag package cannot express on
 	// its own: reshape the arguments first (see tlsutil.NormalizeArgs).
 	flag.CommandLine.Parse(tlsutil.NormalizeArgs(os.Args[1:]))
+	if *showVersion {
+		fmt.Printf("remmote-server %s\n", version.Version)
+		return
+	}
 
 	log := newLogger(*verbose, *logJSON)
 

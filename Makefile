@@ -1,5 +1,8 @@
 GO ?= go
 BIN := bin
+VERSION := $(shell git log -1 --format=%s 2>/dev/null | sed -nE 's/^([0-9]+\.[0-9]+\.[0-9]+) .*/\1/p')
+VERSION := $(if $(VERSION),$(VERSION),0.0.1)
+LDFLAGS := -X github.com/lepe/remmote/internal/version.Version=$(VERSION)
 
 .PHONY: all build build-hub build-webp test integration integration-shutdown lint vendor clean
 
@@ -7,7 +10,7 @@ all: build-webp build-hub
 
 ## build: pure-Go binaries (no CGo; jpeg/zraw/hybrid codecs, optional -tags webp)
 build:
-	CGO_ENABLED=0 $(GO) build -o $(BIN)/ ./cmd/...
+	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/ ./cmd/...
 
 ## build-hub: the connection manager — the one binary that needs a webview
 ## (Wails on webkit2gtk). Skipped politely when the headers are missing:
@@ -34,11 +37,11 @@ build-hub:
 		exit 0; \
 	fi; \
 	echo "building remmote-hub against $$pkg"; \
-	CGO_ENABLED=1 $(GO) build -tags "$$tags" -o $(BIN)/remmote-hub ./cmd/remmote-hub
+	CGO_ENABLED=1 $(GO) build -tags "$$tags" -ldflags "$(LDFLAGS)" -o $(BIN)/remmote-hub ./cmd/remmote-hub
 
 ## build-webp: binaries with the optional lossy WebP encoder (requires libwebp-dev)
 build-webp:
-	CGO_ENABLED=1 $(GO) build -tags webp -o $(BIN)/ ./cmd/...
+	CGO_ENABLED=1 $(GO) build -tags webp -ldflags "$(LDFLAGS)" -o $(BIN)/ ./cmd/...
 
 test:
 	CGO_ENABLED=0 $(GO) test ./...

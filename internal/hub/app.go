@@ -11,6 +11,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/lepe/remmote/internal/api"
+	"github.com/lepe/remmote/internal/version"
 )
 
 // App is what the window sees: the manager's behaviour, with the events
@@ -39,4 +40,4 @@ func (a *App) Shutdown(context.Context) {
 }
 
 // Title is what the window is called; the page shows it too.
-func (a *App) Title() string { return "remmote" }
+func (a *App) Title() string { return "remmote " + version.Version }
