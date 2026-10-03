@@ -1,51 +1,137 @@
 # remmote
 
-Pure-Go (CGo-free by default) Linux X11 screen sharing with **full remote
-control** between two machines. One binary captures and controls; the other
-views and drives.
+**Remote desktops and applications, from Linux to Linux.**
 
-- **`remmote-server`** — runs on the **host** (the machine to view/control).
-  Tracks screen changes with **XDamage**, grabs pixels through **MIT-SHM**
-  (with an automatic core-protocol fallback), encodes only the changed
-  regions with a **hybrid codec** — raw pixels through zstd (*ZRAW*) when
-  they compress ≥4:1 (typical desktop: ~8 ms and ~40 KB per 1080p frame,
-  vs JPEG's ~59 ms and ~574 KB), JPEG otherwise (optionally lossy
-  **WebP**) — and injects keyboard and mouse events via **XTEST** —
-  including VNC-style synthetic-Shift choreography for capital letters
-  and symbols.
-- **`remmote-client`** — runs on the **viewer**. Opens its own X11 window
-  (created directly with the same pure-Go X bindings — no GUI toolkit),
-  composites the stream, rescales live when you resize the window
-  (letterbox), forwards your input with host-screen coordinate mapping —
-  and, since v4, resizes the host side to match: the shared application
-  in `-exec`/`-window` mode, or the host desktop with `-resize-desktop`.
-- **Clipboard sync** — copy on either machine, paste on the other
-  (UTF-8 text, bidirectional, ≤256 KiB; disable with `-no-clipboard` on
-  either side).
+remmote is a direct, point-to-point remote access application for **Linux X11
+on both ends**. View and control a desktop, launch a remote application, or
+share an existing window—with keyboard, mouse, clipboard sync, and sessions
+you can leave running and reconnect to later.
 
-Everything is pure Go: `jezek/xgb` for the X protocol, `golang.org/x/sys`
-for SysV shared memory, `golang.org/x/crypto` for scrypt (the `-tls`
-shared secret), stdlib for TCP/TLS/JPEG/logging. The default build has
-**zero CGo** and cross-compiles anywhere Go does.
+The server, viewer, and command-line tools are written in Go and build without
+CGo. An optional native connection manager helps you save connections and
+manage sessions and paired devices. No cloud account or relay service is required.
+
+[Quick start](#quick-start) · [Screenshots](#screenshots) · [Build](#build) ·
+[Usage](#usage) · [Troubleshooting](#troubleshooting) · [Development](#development)
+
+## Linux to Linux
+
+```mermaid
+flowchart LR
+    subgraph viewer["LOCAL MACHINE · Linux / X11"]
+        hub["Connection manager<br/>remmote-hub"]
+        client["Remote viewer<br/>remmote-client"]
+        hub -->|"opens"| client
+    end
+    subgraph host["REMOTE MACHINE · Linux / X11"]
+        server["Session daemon<br/>remmote-server"]
+        desktop["Desktop · Application · Window"]
+        server --- desktop
+    end
+    client -->|"Keyboard, mouse & resize"| server
+    server -->|"Screen updates"| client
+    client <-->|"Clipboard · TCP / TLS"| server
+```
+
+> [!IMPORTANT]
+> **Linux → Linux only.** Both the host and the viewer require X11.
+> Native Wayland sessions, Windows, macOS, and mobile clients are not supported.
+> A headless host can use Xvfb; a nested session can use Xephyr.
+
+## Features
+
+| Capability | What you can do |
+|---|---|
+| **Desktop and application sharing** | Share a full desktop, launch one application (`-exec`), or attach to an existing window (`-window`). |
+| **Full remote control** | Use your keyboard and mouse, with bidirectional UTF-8 clipboard sync. |
+| **Efficient streaming** | Capture changed regions with XDamage and MIT-SHM; use lossless zstd for compressible content and JPEG for other regions. Optional WebP encoding is available. |
+| **Responsive sizing** | Resize the shared application from the viewer, or enable `-resize-desktop` to resize the host desktop through RANDR. |
+| **Persistent sessions** | Close the viewer to detach; reconnect later to the same session. Terminate sessions explicitly from the hub or CLI. |
+| **Disposable displays** | Create an isolated Xvfb or Xephyr display for a session and remove it when the session ends. |
+| **Connection manager** | Save connection profiles, configure sessions, and manage paired devices with `remmote-hub`. |
+| **Encryption and access control** | Use TLS with a shared secret or certificate pinning, or pair devices with individual credentials, roles, and revocation. |
+| **Automation** | Control sessions with `remmote-ctl`, a JSON HTTP API, and server-sent events. |
+
+## Screenshots
+
+These are captures of the actual application using disposable Xvfb displays
+and dummy connection profiles. **Demo workstation** connects to a real local
+server at `127.0.0.1:17677`; the other saved hosts are illustrative placeholders.
+
+**Connection manager** — saved desktops and applications in one place.
+
+[![remmote connection manager with three dummy profiles and Demo workstation selected](docs/screenshots/connections.png)](docs/screenshots/connections.png)
+
+| Session management | Connected demo desktop |
+|---|---|
+| [![Live demo session remains running after the viewer detaches](docs/screenshots/session.png)](docs/screenshots/session.png) | [![Remote viewer displaying a demo X11 desktop with a calculator controlled through remmote](docs/screenshots/demo-connection.png)](docs/screenshots/demo-connection.png) |
+| Inspect session state, reopen the viewer, or terminate the session. | A real loopback connection to an isolated Linux desktop running `xcalc`. |
+
+Click any screenshot to view it at full size. See the
+[capture notes](docs/screenshots/README.md) for the demo setup.
+
+## Quick start
+
+Build the tools with Go 1.22 or later:
+
+```sh
+make build
+```
+
+On the **remote Linux host**, run this from a terminal in the X11 session you
+want to share. Replace the example secret with your own:
+
+```sh
+./bin/remmote-server -display "$DISPLAY" -listen :7677 -tls 'replace-with-your-shared-secret'
+```
+
+On the **local Linux viewer**, use the same secret and replace the example
+address with your host's address:
+
+```sh
+./bin/remmote-client -server 192.168.1.10:7677 -tls 'replace-with-your-shared-secret'
+```
+
+Both machines need network access to the server's listening port. Close the
+viewer to detach; the host session stays running. For a graphical connection
+manager, [build the hub](#build) and run `./bin/remmote-hub`. For a guided
+terminal setup, run `./scripts/remmote.sh`.
 
 > [!WARNING]
-> **No authentication** — unless you give both sides a shared secret.
-> Anyone who can reach the server's TCP port gets live view *and full
-> keyboard/mouse control* of the host. Use on a trusted LAN only. `-tls` on
-> both sides encrypts the stream in transit; `-tls <secret>` on both sides
-> also makes the server refuse any client that does not carry that secret.
-> Encryption on its own accepts whoever completes the handshake, so it does
-> not make the host private to you. For anything else, tunnel the connection
-> through SSH or WireGuard:
->
-> ```sh
-> ssh -L 7677:localhost:7677 user@host   # then: remmote-client -server localhost:7677
-> ```
+> An unencrypted, unauthenticated connection gives anyone who can reach the
+> listener access to the shared desktop. Use a shared secret or
+> [paired devices](#authentication-paired-devices) to restrict access.
+> TLS encryption alone does not authenticate clients. Non-loopback listeners
+> require TLS unless explicitly started with `-insecure`.
+
+For an SSH tunnel, bind the server to loopback on the host and connect through
+it from the viewer:
+
+```sh
+# On the host, inside the X11 session
+./bin/remmote-server -display "$DISPLAY" -listen 127.0.0.1:7677
+
+# On the viewer, keep this tunnel running in a separate terminal
+ssh -N -L 17677:127.0.0.1:7677 user@host
+
+# On the viewer, connect through the tunnel
+./bin/remmote-client -server 127.0.0.1:17677
+```
+
+## Why remmote?
+
+remmote focuses on remote work between Linux machines on networks you control.
+It brings desktop sharing, individual application sharing, persistent sessions,
+and disposable displays into a direct client/server workflow.
+
+The scope is deliberately focused: Linux X11, direct connections, and remote
+keyboard and mouse control. Audio, file transfer, relay infrastructure, and
+cross-platform clients are outside the current feature set.
 
 ## Build
 
-Requires Go ≥ 1.22. Nothing else — the daemon, the CLI and the viewer
-are pure Go:
+Requires **Go 1.22 or later**. The server and viewer run on Linux with X11;
+the default binaries do not need CGo or a GUI toolkit to build:
 
 ```sh
 make build          # → bin/remmote-server, bin/remmote-ctl, bin/remmote-client
@@ -115,28 +201,31 @@ again when the run ends, Ctrl-C included (only `--print` or "run it
 now? n" keep it, since the printed command still needs it). The manual
 form follows.
 
+For the examples below, set `REMMOTE_SECRET` to the same non-empty shared
+secret in both terminals. Replace `:0` with the host X11 display if needed.
+
 Share the whole desktop — on the **host**:
 
 ```sh
-./bin/remmote-server -display :0 -listen :7677
+./bin/remmote-server -display :0 -listen :7677 -tls "$REMMOTE_SECRET"
 ```
 
 Share a single application instead (spawned by the server, killed with it):
 
 ```sh
-./bin/remmote-server -display :0 -listen :7677 -exec xcalc
+./bin/remmote-server -display :0 -listen :7677 -tls "$REMMOTE_SECRET" -exec xcalc
 ```
 
 Share an existing window (find ids with `xwininfo`):
 
 ```sh
-./bin/remmote-server -display :0 -listen :7677 -window 0x2c00005
+./bin/remmote-server -display :0 -listen :7677 -tls "$REMMOTE_SECRET" -window 0x2c00005
 ```
 
 On the **viewer**:
 
 ```sh
-./bin/remmote-client -server 192.168.1.10:7677
+./bin/remmote-client -server 192.168.1.10:7677 -tls "$REMMOTE_SECRET"
 ```
 
 That's it — move the mouse over the window and type. Close the viewer
@@ -170,7 +259,7 @@ for the next one.
 
 The flags above describe the session shared **at startup**. A client can
 also say what to share, at any time, over the control API — `remmote-ctl
-start -spec spec.json` or, once it exists, the GUI — and with `-idle`
+start -spec spec.json` or the connection manager — and with `-idle`
 the daemon shares nothing until one does. Only one session runs per
 daemon.
 
@@ -184,13 +273,13 @@ command basename; `*` permits everything.
 
 ```sh
 # a daemon that waits for a client to say what to share
-./bin/remmote-server -idle -listen :7677 -allow-exec xcalc
+./bin/remmote-server -idle -listen :7677 -tls "$REMMOTE_SECRET" -allow-exec xcalc
 
 # ... and a client that starts a session on it
-./bin/remmote-ctl -server 192.168.1.10:7677 start -spec session.json -wait
+./bin/remmote-ctl -server 192.168.1.10:7677 -tls "$REMMOTE_SECRET" start -spec session.json -wait
 ```
 
-`remmote-ctl` speaks the same API the GUI will: `host` (what the daemon
+`remmote-ctl` speaks the same API as the connection manager: `host` (what the daemon
 offers), `session`, `start`, `events`, `terminate`. The spec is JSON —
 the same shape as a saved connection profile:
 
@@ -241,10 +330,10 @@ ordinary X:
 
 ```sh
 Xvfb :88 -screen 0 1920x1080x24 &        # apt install xvfb
-XAUTHORITY=~/.Xauthority ./bin/remmote-server -display :88 -listen :7677 -exec xcalc
+XAUTHORITY=~/.Xauthority ./bin/remmote-server -display :88 -listen :7677 -tls "$REMMOTE_SECRET" -exec xcalc
 
 # or let xvfb-run make the display and just use its $DISPLAY:
-xvfb-run -a ./bin/remmote-server -listen :7677 -exec xcalc
+xvfb-run -a ./bin/remmote-server -listen :7677 -tls "$REMMOTE_SECRET" -exec xcalc
 ```
 
 Worth knowing about a display you create:
@@ -418,7 +507,7 @@ and — when the screen has to shrink — first moves each output to the
 largest mode that fits before retrying.
 
 ```sh
-./bin/remmote-server -display :0 -listen :7677 -resize-desktop
+./bin/remmote-server -display :0 -listen :7677 -tls "$REMMOTE_SECRET" -resize-desktop
 ```
 
 - **Best effort, and it falls back quietly.** Displays vary wildly in

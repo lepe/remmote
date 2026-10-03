@@ -125,13 +125,17 @@
           <option value="2">2:1 — half the pixels</option>
           <option value="4">4:1 — a quarter</option>
         </select>
-        <label class="check"><input type="checkbox" id="e-clipboard"> clipboard</label>
-        <label class="check"><input type="checkbox" id="e-resize"> let the viewer resize the host screen</label>
+        <label class="check" id="e-resize-label"><input type="checkbox" id="e-resize"> Resize host screen</label>
+        <label class="check"><input type="checkbox" id="e-fast"> Fast scaling</label>
+      </div>
+
+      <label for="e-clipboard">Clipboard</label>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="e-clipboard"> Enabled</label>
       </div>
 
       <span class="field-label">Viewer</span>
       <div class="row">
-        <label class="check"><input type="checkbox" id="e-fast"> fast scaling</label>
         <span class="muted" id="e-device"></span>
       </div>
     </fieldset>

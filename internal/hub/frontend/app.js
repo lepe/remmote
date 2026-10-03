@@ -309,6 +309,8 @@ function shapeEditor() {
   document.querySelector(".only-create").style.display = kind === "create" ? "contents" : "none";
   $("e-displayname").style.display = kind === "create" ? "none" : "";
   $("e-createhost").style.display = server === "xephyr" ? "" : "none";
+  // Resizing the host screen only makes sense on a nested Xephyr display.
+  $("e-resize-label").style.display = kind === "create" && server === "xephyr" ? "" : "none";
   if (source === "window") {
     // A window lives on a display that already exists: the create choice
     // has nothing to list, so the source decides, not a leftover pick.
