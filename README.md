@@ -2,7 +2,7 @@
 
 **Remote desktops and applications, from Linux to Linux.**
 
-remmote is a direct, point-to-point remote access application for **Linux X11
+`Remmote` is a direct, point-to-point remote access application for **Linux X11
 on both ends**. View and control a desktop, launch a remote application, or
 share an existing window—with keyboard, mouse, clipboard sync, and sessions
 you can leave running and reconnect to later.
@@ -11,8 +11,13 @@ The server, viewer, and command-line tools are written in Go and build without
 CGo. An optional native connection manager helps you save connections and
 manage sessions and paired devices. No cloud account or relay service is required.
 
-[Quick start](#quick-start) · [Screenshots](#screenshots) · [Build](#build) ·
-[Usage](#usage) · [Troubleshooting](#troubleshooting) · [Development](#development)
+> *NOTE* : I started this project because X2GO seems to be unmaintained and 
+some of its current bugs and interface haven't been fixed in a while. I was also
+looking for more flexibility, performance and functionality. I build this project
+with the help of AI agents (GLM 5.3 and ChatGPT 6).
+
+[Get connected](#get-connected) · [Screenshots](#screenshots) · [Build](#build) ·
+[Usage reference](#usage-reference) · [Troubleshooting](#troubleshooting) · [Development](#development)
 
 ## Linux to Linux
 
@@ -70,51 +75,118 @@ server at `127.0.0.1:17677`; the other saved hosts are illustrative placeholders
 Click any screenshot to view it at full size. See the
 [capture notes](docs/screenshots/README.md) for the demo setup.
 
-## Quick start
+## How it compares
 
-Build the tools with Go 1.22 or later:
+This table compares common capabilities across the projects. LAN speed is a
+qualitative summary of each tool's design, not a benchmark; results depend on
+the workload, network, and configuration. VNC features vary by implementation.
+
+| Capability | [remmote](#linux-to-linux) | [ssh -X](https://man.openbsd.org/ssh) | [Xpra](https://xpra.org/) | [X2Go](https://wiki.x2go.org/) | [VNC](https://tigervnc.org/) | [RustDesk](https://rustdesk.com/) |
+|---|---|---|---|---|---|---|
+| **Design target** | ✅ Direct Linux desktop, app, or window control | ✅ Forward individual X applications over SSH | ✅ Forward applications or persistent desktops | ✅ Linux remote desktops and published apps over NX/SSH | ✅ Remote desktop sharing via RFB | ✅ Cross-platform remote access, with P2P and relay options |
+| **Platforms** | ⚠️ Linux X11 on both ends; no mobile viewer | ⚠️ SSH host plus an X server on the viewer | ✅ Linux host; Linux, Windows, macOS, and HTML5 clients | ⚠️ Linux host; clients for Linux, Windows, and macOS | ✅ Broad support across implementations | ✅ Linux, Windows, macOS, iOS, Android, and web |
+| **Server footprint** | ✅ One Go daemon; hub is optional | ✅ OpenSSH and the remote X application | ⚠️ Python server and supporting packages | ⚠️ X2Go server and NX components | ⚠️ VNC server and viewer; depends on implementation | ⚠️ Client plus ID/rendezvous service; relay may be used |
+| **LAN speed** | ✅ Damage-driven updates and hybrid zstd/JPEG encoding | ⚠️ X11 round trips can feel slow for chatty apps | ✅ Designed to adapt and compress remote display traffic | ✅ NX optimized for remote X sessions | ⚠️ Depends on server, encoding, and viewer | ✅ Adaptive codecs, including hardware-accelerated options where available |
+| **Whole desktop** | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| **Single app or existing window** | ✅ Launch an app or share a window | ✅ Individual apps; ❌ existing-window sharing | ✅ Applications and windows | ⚠️ Published apps; generally not an arbitrary existing window | ⚠️ Some servers can share a window | ⚠️ Primarily desktop-oriented; varies by platform |
+| **Clipboard sync** | ✅ Bidirectional text | ⚠️ Through X selections; no separate clipboard sync service | ✅ | ✅ | ⚠️ Text clipboard support depends on implementation | ✅ |
+| **Session persistence** | ✅ Detach and reconnect while the daemon keeps the session | ❌ SSH-forwarded apps depend on the SSH session | ✅ Detach and reattach to persistent sessions | ✅ Suspend and resume sessions | ✅ With a persistent server display, such as Xvnc | ✅ Reconnect to the host desktop while it remains available |
+| **Viewer-driven remote resize** | ✅ Resize shared app or host desktop | ❌ No remote desktop resize control | ✅ Display geometry can follow the client | ⚠️ Supported, but desktop-environment dependent | ⚠️ Supported by some server/viewer pairs | ⚠️ Display scaling and resolution options vary by platform |
+| **Audio** | ❌ | ❌ | ✅ | ✅ | ❌ Standard VNC does not include audio | ✅ |
+| **Encryption** | ✅ TLS; certificate pinning or shared secret | ✅ SSH | ✅ SSH or TLS, depending on connection | ✅ SSH | ⚠️ Depends on VNC implementation and security mode | ✅ End-to-end encrypted sessions |
+| **Access control** | ✅ Paired devices, roles, and per-device revocation | ✅ SSH accounts and keys | ✅ Configurable authentication modules | ✅ SSH user accounts and authentication | ⚠️ Varies by server and authentication mode | ✅ Passwords, permissions, and account controls |
+| **NAT traversal** | ❌ No built-in traversal; use a tunnel or port forwarding | ⚠️ Uses SSH, which must itself be reachable | ⚠️ SSH or reachable server port required | ⚠️ SSH must be reachable | ⚠️ Usually needs a reachable port or tunnel | ✅ P2P when possible, with relay fallback |
+| **Control API** | ✅ HTTP API, SSE events, and `remmote-ctl` | ❌ | ⚠️ CLI and server control commands | ⚠️ CLI tools; no comparable session API | ❌ No standard cross-implementation control API | ⚠️ Server API features depend on edition |
+| **Maintenance status** | ✅ [Active development](https://github.com/lepe/remmote) | ✅ [Actively maintained](https://www.openssh.org/releasenotes.html) | ✅ [Active releases](https://github.com/Xpra-org/xpra/releases) | ⚠️ Ongoing development; component release cadence varies ([dev list](https://lists.x2go.org/hyperkitty/list/x2go-dev%40lists.x2go.org/latest)) | ⚠️ Depends on implementation; [TigerVNC is active](https://github.com/TigerVNC/tigervnc/releases) | ✅ [Active releases](https://github.com/rustdesk/rustdesk/releases) |
+| **Programming language** | Go (hub UI: JavaScript) | C (OpenSSH) | Primarily Python, with native modules | Mixed: C++, Perl, and Python across components | No language for VNC itself; TigerVNC is primarily C++ | Rust core with Flutter/Dart UI |
+| **Binary / package size (runtime)** | About 8–10 MB per server/client binary; 15 MB hub, plus GTK/WebKitGTK runtime | About 1 MB for `ssh` (about 6 MB for the OpenSSH client package); X server/apps excluded | About 3 MB download / 15 MB installed package in Debian; Python, GTK, and media runtime dependencies add more | About 1–3 MB per core package; Qt, NX, and SSH runtime packages add more | About 1 MB download / 3 MB installed TigerVNC server package; viewer and X runtime vary | About 21 MB `.deb` or 86 MB AppImage; system runtime libraries may still be needed |
+
+**Legend:** ✅ supported, built in, or actively maintained · ⚠️ partial, variable, or uneven · ❌ unavailable or not provided. Maintenance status is a point-in-time snapshot (October 2026); follow the linked project activity for updates.
+
+Sizes are approximate Linux x86-64 examples, not like-for-like totals: package formats and shared runtime libraries differ, and an existing desktop may already provide some dependencies. Figures exclude development packages such as `-dev` headers and build tools. remmote binary sizes are from this repository's build; other figures use [Debian package metadata](https://packages.debian.org/stable/openssh-client), [Debian Xpra package data](https://packages.debian.org/stable/x11/xpra), [Debian X2Go package data](https://packages.debian.org/stable/x11/x2goclient), [Debian TigerVNC package data](https://packages.debian.org/stable/x11/tigervnc-standalone-server), and [RustDesk Linux release artifacts](https://github.com/rustdesk/rustdesk/releases).
+
+See the projects' documentation for details: [OpenSSH X11 forwarding](https://www.openssh.org/features.html), [Xpra features and networking](https://xpra.org/manual), [X2Go sessions and published applications](https://wiki.x2go.org/doku.php/doc:newtox2go), [TigerVNC viewer options](https://tigervnc.org/doc/vncviewer.html), and [RustDesk platforms and features](https://rustdesk.com/docs/en/client/).
+
+## Get connected
+
+Choose the connection method that fits how you want to work. In every case,
+start `remmote-server` on the **remote Linux host** first. Both machines need
+Linux with X11, and the host must be reachable from the viewer.
+
+### 1. Recommended: connection manager
+
+Build the hub on the **local Linux viewer**. It needs Go 1.22 or later and
+WebKitGTK development libraries; see [Build](#build) for setup.
 
 ```sh
-make build
+make build build-hub
+./bin/remmote-hub
 ```
 
-On the **remote Linux host**, run this from a terminal in the X11 session you
-want to share. Replace the example secret with your own:
+On the **remote host**, start an idle daemon with device pairing enabled:
 
 ```sh
-./bin/remmote-server -display "$DISPLAY" -listen :7677 -tls 'replace-with-your-shared-secret'
+./bin/remmote-server -idle -listen :7677 -auth
 ```
 
-On the **local Linux viewer**, use the same secret and replace the example
-address with your host's address:
+The server prints a one-time pairing code. In the hub, open **Devices → New
+device**, enter the host address and pairing code, and pair the viewer. Then
+create a connection, choose what to share, and connect. The paired device
+uses TLS and can be revoked from the hub later. Closing the viewer detaches
+from the session; it does not stop the host daemon or session.
+
+### 2. Guided setup: `remmote.sh`
+
+Run the script on each machine to choose server or client mode and configure
+the display, sharing mode, address, and TLS options. It prints the command
+before running it; pass `--print` to print the command without running it.
 
 ```sh
-./bin/remmote-client -server 192.168.1.10:7677 -tls 'replace-with-your-shared-secret'
+# Run on the remote host, then choose server mode
+./scripts/remmote.sh
+
+# Run on the local Linux viewer, then choose client mode
+./scripts/remmote.sh
 ```
 
-Both machines need network access to the server's listening port. Close the
-viewer to detach; the host session stays running. For a graphical connection
-manager, [build the hub](#build) and run `./bin/remmote-hub`. For a guided
-terminal setup, run `./scripts/remmote.sh`.
+The host script can create an Xvfb or Xephyr display when needed. Follow the
+prompts on both machines and use matching TLS settings.
+
+### 3. Direct commands: `remmote-client`
+
+For a shared-secret connection, set the same secret in a terminal on each
+machine. On the **remote host**, share the current X11 desktop:
+
+```sh
+export REMMOTE_SECRET='choose-a-long-random-secret'
+./bin/remmote-server -display "$DISPLAY" -listen :7677 -tls "$REMMOTE_SECRET"
+```
+
+On the **local Linux viewer**, connect to the host's address:
+
+```sh
+export REMMOTE_SECRET='choose-a-long-random-secret'
+./bin/remmote-client -server 192.168.1.10:7677 -tls "$REMMOTE_SECRET"
+```
+
+Replace `192.168.1.10` with the host's reachable IP or name. To share one
+application, add `-exec xcalc` to the server command. To share an existing
+window, use `-window 0x2c00005` instead; find its ID with `xwininfo`.
 
 > [!WARNING]
-> An unencrypted, unauthenticated connection gives anyone who can reach the
-> listener access to the shared desktop. Use a shared secret or
-> [paired devices](#authentication-paired-devices) to restrict access.
-> TLS encryption alone does not authenticate clients. Non-loopback listeners
-> require TLS unless explicitly started with `-insecure`.
+> Do not expose an unencrypted, unauthenticated listener to a network. A
+> reachable client can view and control the shared desktop. Use pairing (`-auth`)
+> or a shared secret (`-tls SECRET`) to restrict access. TLS encryption without
+> a shared secret or paired identity does not authenticate the client.
 
-For an SSH tunnel, bind the server to loopback on the host and connect through
-it from the viewer:
+To connect through an SSH tunnel instead, bind the host server to loopback:
 
 ```sh
-# On the host, inside the X11 session
+# Remote host
 ./bin/remmote-server -display "$DISPLAY" -listen 127.0.0.1:7677
 
-# On the viewer, keep this tunnel running in a separate terminal
+# Local viewer, in a second terminal
 ssh -N -L 17677:127.0.0.1:7677 user@host
-
-# On the viewer, connect through the tunnel
 ./bin/remmote-client -server 127.0.0.1:17677
 ```
 
@@ -184,68 +256,14 @@ sudo apt install libwebp-dev     # Ubuntu/Debian
 make build-webp                  # → same binaries + WebP, run server with -codec webp
 ```
 
-## Usage
+## Usage reference
 
-Rather answer questions than assemble flags? `./scripts/remmote.sh`
-asks what to run (server or client), on which display, and with which
-options — including `-exec`, `-window`, `-maximize`, `-resize-desktop`
-and the three `-tls` modes — then prints the exact command line and runs
-it (`--print` to only print it). On the server side it also prints, in a
-box, the `remmote-client` command that connects to it — with the right
-address (this machine's, over a tunnel when the server listens on
-localhost only) and the matching `-tls`, `-upscale` and clipboard flags.
-Name a display that does not exist yet and it offers to create one for
-you, running `scripts/start-xvfb.sh` or `scripts/start-xephyr.sh` and
-picking up the cookie they make — and a display it started is stopped
-again when the run ends, Ctrl-C included (only `--print` or "run it
-now? n" keep it, since the printed command still needs it). The manual
-form follows.
-
-For the examples below, set `REMMOTE_SECRET` to the same non-empty shared
-secret in both terminals. Replace `:0` with the host X11 display if needed.
-
-Share the whole desktop — on the **host**:
-
-```sh
-./bin/remmote-server -display :0 -listen :7677 -tls "$REMMOTE_SECRET"
-```
-
-Share a single application instead (spawned by the server, killed with it):
-
-```sh
-./bin/remmote-server -display :0 -listen :7677 -tls "$REMMOTE_SECRET" -exec xcalc
-```
-
-Share an existing window (find ids with `xwininfo`):
-
-```sh
-./bin/remmote-server -display :0 -listen :7677 -tls "$REMMOTE_SECRET" -window 0x2c00005
-```
-
-On the **viewer**:
-
-```sh
-./bin/remmote-client -server 192.168.1.10:7677 -tls "$REMMOTE_SECRET"
-```
-
-That's it — move the mouse over the window and type. Close the viewer
-window to disconnect (the client also auto-reconnects if the network
-drops).
-
-Or let the client ask: **`./bin/remmote-hub` opens the connection
-manager** — a window with the connections you have saved, a form for
-what to share, a panel for whatever is running right now, and the list
-of paired devices. `Enter` connects; `e` edits; `n` makes a new one.
-Connecting puts you back in what the host is sharing — the viewer opens
-in a session that is already running, and a host with nothing to join
-gets a new one, whose viewer opens as soon as it is live. Closing the
-viewer's window detaches and nothing
-more — the session goes on, and connecting again picks it up.
-Terminating a session is a deliberate act on the panel: the session
-ends, and the daemon stays up for the next one. Connections
-are saved in `~/.config/remmote/profiles.d/` (one JSON file each,
-hand-editable). (`remmote-client` with no `-server` launches the manager
-for you when it is installed.)
+The hub saves connections under `~/.config/remmote/profiles.d/`. Press
+`Enter` to connect, `e` to edit a profile, or `n` to create one. Connect to
+an existing session or start one from the selected profile. Closing the
+viewer detaches; use **Terminate session** to stop the session while leaving
+the daemon available for the next connection. `remmote-client` without
+`-server` opens the hub when it is installed.
 
 ### The daemon and its session
 
