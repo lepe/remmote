@@ -85,14 +85,16 @@
         <label class="check"><input type="checkbox" id="e-maximize"> maximize on the host screen</label>
       </div>
 
-      <label for="e-displaykind">Display</label>
-      <div class="row">
-        <select id="e-displaykind">
-          <option value="existing">Existing display</option>
-          <option value="create">Create a display</option>
-        </select>
-        <input id="e-displayname" class="only-existing" list="host-displays" placeholder=":0" aria-label="Display name">
-        <datalist id="host-displays"></datalist>
+      <div class="only-display grid">
+        <label for="e-displaykind">Display</label>
+        <div class="row">
+          <select id="e-displaykind">
+            <option value="existing">Existing display</option>
+            <option value="create">Create a display</option>
+          </select>
+          <input id="e-displayname" class="only-existing" list="host-displays" placeholder=":0" aria-label="Display name">
+          <datalist id="host-displays"></datalist>
+        </div>
       </div>
       <div class="only-create grid">
         <label for="e-createserver">Display server</label>
@@ -132,11 +134,6 @@
       <label for="e-clipboard">Clipboard</label>
       <div class="row">
         <label class="check"><input type="checkbox" id="e-clipboard"> Enabled</label>
-      </div>
-
-      <span class="field-label">Viewer</span>
-      <div class="row">
-        <span class="muted" id="e-device"></span>
       </div>
     </fieldset>
     </div>

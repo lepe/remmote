@@ -50,6 +50,12 @@ function mkSelect(id) {
 
 const els = {};
 const byId = (id) => (els[id] ||= (id === "e-host" ? mkSelect(id) : mkEl(id)));
+
+// querySelector is how the editor decides what to show: one element per
+// selector, so what shapeEditor did to it can be looked at — and the
+// checked source radio is one the test sets by hand.
+const bySelector = {};
+const sourceRadio = mkEl("source-checked");
 for (const id of ["devices", "devices-list-panel", "device-form", "btn-new-device", "btn-pair",
   "device-form-title", "d-name", "d-server", "d-role", "d-code", "d-code-row", "d-tls", "d-tls-warn",
   "view-devices", "modal", "e-host", "e-name", "e-server", "e-probe", "e-rest"]) byId(id);
@@ -71,7 +77,7 @@ const sandbox = {
   Date, JSON, Math, Object, Array, String, Number, Error, Promise, isNaN, parseFloat, parseInt,
   document: {
     getElementById: byId,
-    querySelector: () => mkEl("q"),
+    querySelector: (sel) => (sel === 'input[name="source"]:checked' ? sourceRadio : (bySelector[sel] ||= mkEl(sel))),
     querySelectorAll: () => [],
     createElement: (tag) => (tag === "option" ? { value: "", textContent: "", title: "" } : mkEl(tag)),
     addEventListener: () => {},
@@ -81,7 +87,7 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
-vm.runInContext(src + "\n;globalThis.__x = {state, editDevice, newDevice, saveDevice, refreshDevices, showForm, fillDevices, chooseDevice, knownServers, returnToEditor};", sandbox);
+vm.runInContext(src + "\n;globalThis.__x = {state, editDevice, newDevice, saveDevice, refreshDevices, showForm, fillDevices, chooseDevice, knownServers, returnToEditor, shapeEditor};", sandbox);
 const { editDevice, newDevice, saveDevice, refreshDevices, showForm, state } = sandbox.__x;
 let fails = 0;
 const ok = (cond, label) => { console.log((cond ? "  PASS " : "  FAIL ") + label); if (!cond) fails++; };
@@ -185,6 +191,38 @@ ok(byId("e-server").value === "", "giving up leaves no server behind");
 // A value that is not offered is not silently selected.
 fillDevices("nowhere:1");
 ok(byId("e-host").value === "", "an unknown address selects nothing");
+
+// ── what each Share choice shows ───────────────────────────────────
+const { shapeEditor } = sandbox.__x;
+const shown = (sel) => (bySelector[sel] ? bySelector[sel].style.display : "");
+
+// The window source picks its display in its own picker; the Display
+// row below it would ask for the very same thing a second time.
+byId("e-displaykind").value = "existing";
+sourceRadio.value = "window";
+shapeEditor();
+ok(shown(".only-window") === "contents", "window source shows its display and window pickers");
+ok(shown(".only-display") === "none", "window source hides the second Display row");
+
+// The other sources still get that row.
+sourceRadio.value = "desktop";
+shapeEditor();
+ok(shown(".only-display") === "contents", "desktop shows the Display row");
+ok(shown(".only-window") === "none", "desktop hides the window pickers");
+ok(shown(".only-create") === "none", "an existing display shows no create fields");
+
+sourceRadio.value = "app";
+byId("e-displaykind").value = "create";
+shapeEditor();
+ok(shown(".only-display") === "contents", "app shows the Display row");
+ok(shown(".only-create") === "contents", "a display to create shows its fields");
+
+// A window lives on a display that already exists, so a leftover
+// "Create a display" is not honoured for it.
+sourceRadio.value = "window";
+shapeEditor();
+ok(byId("e-displaykind").value === "existing", "window source drops a leftover create-display choice");
+ok(shown(".only-create") === "none", "and shows no create-display fields");
 
 console.log(fails ? `\n${fails} FAILED` : "\nall passed");
 process.exit(fails ? 1 : 0);

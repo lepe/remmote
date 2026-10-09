@@ -133,7 +133,7 @@ kbd { font: 10px system-ui, sans-serif; border: 1px solid #3a4657; border-radius
 .form-panel { padding: 20px; margin-bottom: 18px; }
 .section-heading { margin-bottom: 18px; }
 .grid { display: grid; grid-template-columns: 124px minmax(0, 1fr); gap: 14px 18px; align-items: center; }
-.grid > .grid, .grid > .not-desktop, .grid > .only-app, .grid > .only-window { display: contents; }
+.grid > .grid, .grid > .not-desktop, .grid > .only-app, .grid > .only-window, .grid > .only-display { display: contents; }
 label, .field-label { color: var(--muted); font-size: 12px; }
 label.inline { display: inline-flex; align-items: center; gap: 7px; }
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; min-width: 0; }

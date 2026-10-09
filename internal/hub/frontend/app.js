@@ -126,7 +126,6 @@ async function probe() {
     rest.disabled = false;
     $("e-probe").classList.add("ok");
     $("e-probe").textContent = "connected" + (res.device ? " as " + res.device : "");
-    $("e-device").textContent = res.device ? "as " + res.device : "";
     applyHost(res.host);
   } catch (err) {
     rest.disabled = true;
@@ -301,10 +300,16 @@ async function openEditor(name) {
 // with their choice.
 function shapeEditor() {
   const source = document.querySelector('input[name="source"]:checked')?.value || "desktop";
+  // A window lives on a display that already exists: the create choice
+  // has nothing to list, so the source decides, not a leftover pick.
+  if (source === "window" && $("e-displaykind").value === "create") $("e-displaykind").value = "existing";
   const kind = $("e-displaykind").value;
   const server = $("e-createserver").value;
   document.querySelector(".only-app").style.display = source === "app" ? "contents" : "none";
   document.querySelector(".only-window").style.display = source === "window" ? "contents" : "none";
+  // The window picker names its own display, so the Display row would
+  // ask for the very same thing a second time below it.
+  document.querySelector(".only-display").style.display = source === "window" ? "none" : "contents";
   document.querySelector(".not-desktop").style.display = source === "desktop" ? "none" : "contents";
   document.querySelector(".only-create").style.display = kind === "create" ? "contents" : "none";
   $("e-displayname").style.display = kind === "create" ? "none" : "";
@@ -312,9 +317,6 @@ function shapeEditor() {
   // Resizing the host screen only makes sense on a nested Xephyr display.
   $("e-resize-label").style.display = kind === "create" && server === "xephyr" ? "" : "none";
   if (source === "window") {
-    // A window lives on a display that already exists: the create choice
-    // has nothing to list, so the source decides, not a leftover pick.
-    if (kind === "create") $("e-displaykind").value = "existing";
     fillWindowDisplay();
     refreshWindowList();
   }
